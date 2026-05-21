@@ -1,0 +1,8 @@
+# Reports and temporary generated sheets
+Reporte_Candidatos_Hidroobras.csv
+Reporte_Candidatos_Hidroobras.xlsx
+
+# System files
+.DS_Store
+Thumbs.db
+*.log
