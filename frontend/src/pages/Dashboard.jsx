@@ -309,6 +309,51 @@ const getCargoChartColors = (cargoName) => {
   }
 }
 
+// Muestra si la revisión automática de correos está corriendo. Si se atrasa o
+// falla, se pone en rojo: así se nota sin tener que revisar el servidor.
+function IndicadorRevisionAutomatica({ estado }) {
+  if (!estado) return null
+
+  const { ultima, atrasada } = estado
+
+  const hace = (fechaIso) => {
+    const minutos = Math.round((Date.now() - new Date(fechaIso).getTime()) / 60000)
+    if (minutos < 1) return 'hace un momento'
+    if (minutos < 60) return `hace ${minutos} min`
+    const horas = Math.round(minutos / 60)
+    if (horas < 48) return `hace ${horas} h`
+    return `hace ${Math.round(horas / 24)} días`
+  }
+
+  let color = 'text-emerald-700'
+  let punto = 'bg-emerald-500'
+  let texto
+
+  if (!ultima) {
+    color = 'text-red-700'
+    punto = 'bg-red-500'
+    texto = 'Revisión automática de correos: todavía no se ha ejecutado'
+  } else if (atrasada) {
+    color = 'text-red-700'
+    punto = 'bg-red-500'
+    texto = `Revisión automática de correos detenida: última ${hace(ultima.fecha)}. Usa "Revisar correos" y avisa a sistemas.`
+  } else if (!ultima.ok) {
+    color = 'text-amber-700'
+    punto = 'bg-amber-500'
+    texto = `Revisión automática ${hace(ultima.fecha)} con errores${ultima.mensaje ? `: ${ultima.mensaje}` : ''}`
+  } else {
+    const nuevas = ultima.resultados?.importados ?? 0
+    texto = `Revisión automática de correos activa · ${hace(ultima.fecha)}${nuevas > 0 ? ` · ${nuevas} nuevas` : ''}`
+  }
+
+  return (
+    <p className={`flex items-center gap-2 text-xs mt-1 ${color}`} title={ultima ? new Date(ultima.fecha).toLocaleString() : ''}>
+      <span className={`inline-block w-2 h-2 rounded-full ${punto}`} />
+      {texto}
+    </p>
+  )
+}
+
 export default function Dashboard() {
   const navigate = useNavigate()
   const [data, setData]                 = useState(null)
@@ -324,7 +369,17 @@ export default function Dashboard() {
   const [progressLogs, setProgressLogs] = useState([])
   const [canCancel, setCanCancel]       = useState(false)
   const [checkResult, setCheckResult]   = useState(null)
-  
+
+  // Estado de la revisión automática (cada 15 min en el servidor)
+  const [revisionAuto, setRevisionAuto] = useState(null)
+
+  useEffect(() => {
+    const cargar = () => api.get('/email/estado-automatico').then(res => setRevisionAuto(res.data)).catch(() => {})
+    cargar()
+    const intervalo = setInterval(cargar, 60000)
+    return () => clearInterval(intervalo)
+  }, [])
+
   const cancelledRef = useRef(false)
   const logsContainerRef = useRef(null)
   const chartRef = useRef(null)
@@ -658,6 +713,7 @@ export default function Dashboard() {
         <div>
           <h1 className="section-title">Dashboard</h1>
           <p className="section-sub">Resumen del sistema de reclutamiento Hidroobras</p>
+          <IndicadorRevisionAutomatica estado={revisionAuto} />
         </div>
         <div className="flex items-center gap-2">
           <select

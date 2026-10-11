@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Postulacion;
 use App\Services\GeminiService;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Webklex\PHPIMAP\ClientManager;
@@ -94,22 +95,24 @@ class EmailImportService
         // ── FASE 2: construir lista liviana para la IA ────────────────────────
         $lista    = [];   // [{idx, from, nombre, asunto, fecha}]  — solo texto
         $indexMap = [];   // idx => message object
+        $msgIds   = [];   // idx => Message-ID
 
         $idx = 0;
         foreach ($messages as $message) {
             $msgId = (string)($message->getMessageId()->first() ?? '');
 
-            // Descartar duplicados antes de enviar a la IA
-            if ($msgId && Postulacion::where('mensaje_id_email', $msgId)->exists()) {
+            // Descartar lo ya revisado (postulaciones y descartados) antes de enviar a la IA
+            if ($this->yaRevisado($msgId)) {
                 $resultados['duplicados']++;
                 continue;
             }
 
+            $msgIds[$idx]  = $msgId;
             $lista[]       = [
                 'idx'    => $idx,
                 'from'   => (string)($message->getFrom()->first()?->mail ?? ''),
-                'nombre' => (string)($message->getFrom()->first()?->personal ?? ''),
-                'asunto' => (string)($message->getSubject()->first() ?? ''),
+                'nombre' => $this->decodeHeaderValue((string)($message->getFrom()->first()?->personal ?? '')),
+                'asunto' => $this->decodeHeaderValue((string)($message->getSubject()->first() ?? '')),
                 'fecha'  => $message->getDate()->first()?->toDateTime()?->format('Y-m-d') ?? '',
             ];
             $indexMap[$idx] = $message;
@@ -127,6 +130,12 @@ class EmailImportService
         $seleccionados = $gemini->filtrarPostulaciones($lista);
 
         Log::info("EmailImport: Gemini identificó " . count($seleccionados) . " postulaciones de {$idx} correos.");
+
+        // Llegar aqui significa que Gemini respondio bien (si falla, lanza
+        // excepcion), asi que los no seleccionados se pueden recordar.
+        foreach (array_diff(array_keys($msgIds), $seleccionados) as $descartado) {
+            $this->marcarRevisado($msgIds[$descartado], 'no_postulacion', $config['username']);
+        }
 
         // ── FASE 4: solo descargar y guardar los que la IA aprobó ─────────────
         foreach ($seleccionados as $selIdx) {
@@ -148,6 +157,35 @@ class EmailImportService
 
         $client->disconnect();
         return $resultados;
+    }
+
+    /**
+     * true si el correo ya termino en postulacion, o ya se reviso y se
+     * descarto. En ambos casos no hay que volver a mandarlo a Gemini.
+     */
+    public function yaRevisado(string $mensajeId): bool
+    {
+        if ($mensajeId === '') {
+            return false;
+        }
+
+        return Postulacion::where('mensaje_id_email', $mensajeId)->exists()
+            || DB::table('correos_revisados')->where('mensaje_id', $mensajeId)->exists();
+    }
+
+    /** Recuerda un correo descartado para no reclasificarlo en la siguiente revision. */
+    public function marcarRevisado(string $mensajeId, string $resultado, ?string $cuenta = null): void
+    {
+        if ($mensajeId === '') {
+            return;
+        }
+
+        DB::table('correos_revisados')->insertOrIgnore([
+            'mensaje_id' => $mensajeId,
+            'resultado' => $resultado,
+            'cuenta' => $cuenta,
+            'created_at' => now(),
+        ]);
     }
 
     protected function guardarPostulacion($message, array $meta, string $emailOrigen): string
@@ -173,7 +211,7 @@ class EmailImportService
         $cvMime      = null;
 
         foreach ($attachments as $attachment) {
-            $nombre    = (string)$attachment->getName();
+            $nombre    = $this->decodeHeaderValue((string)$attachment->getName());
             $extension = strtolower(pathinfo($nombre, PATHINFO_EXTENSION));
 
             if (in_array($extension, $this->extensionesPermitidas)) {
@@ -194,6 +232,8 @@ class EmailImportService
 
         if (!$cvGuardado) {
             Log::info("EmailImport: El correo #{$messageId} de {$meta['from']} no tiene adjunto de CV válido. Ignorando.");
+            // Sin recordarlo, se volvia a descargar completo (hasta 13 MB) en cada revision.
+            $this->marcarRevisado($messageId, 'sin_cv', $emailOrigen);
             return 'sin_cv';
         }
 
@@ -215,13 +255,20 @@ class EmailImportService
         ]);
 
         if ($cvGuardado) {
-            // Creamos o actualizamos el registro del candidato en estado pendiente.
-            // Para evitar bloqueos del servidor local y timeouts en el navegador,
-            // el procesamiento de los CVs con IA se ejecutará secuencialmente desde el frontend.
-            \App\Models\Candidato::updateOrCreate(
-                ['postulacion_id' => $postulacion->id],
-                ['estado_parseo' => 'pendiente']
-            );
+            // Procesar y evaluar al candidato con IA inmediatamente de forma síncrona
+            try {
+                \App\Jobs\ProcessCvJob::dispatchSync($postulacion->id);
+            } catch (\Exception $e) {
+                Log::error("EmailImportService: Error al evaluar CV con IA para la postulación #{$postulacion->id}: " . $e->getMessage());
+                // Registrar el estado de error en el candidato para que el usuario pueda reintentarlo
+                \App\Models\Candidato::updateOrCreate(
+                    ['postulacion_id' => $postulacion->id],
+                    [
+                        'estado_parseo' => 'error',
+                        'error_parseo'  => $e->getMessage()
+                    ]
+                );
+            }
         }
 
         return 'importado';
@@ -265,7 +312,7 @@ class EmailImportService
 
                     if (!$uid) continue;
 
-                    if ($msgId && Postulacion::where('mensaje_id_email', $msgId)->exists()) {
+                    if ($this->yaRevisado($msgId)) {
                         continue;
                     }
 
@@ -273,8 +320,8 @@ class EmailImportService
                         'uid'        => $uid,
                         'message_id' => $msgId,
                         'from'       => (string)($message->getFrom()->first()?->mail ?? ''),
-                        'nombre'     => (string)($message->getFrom()->first()?->personal ?? ''),
-                        'asunto'     => (string)($message->getSubject()->first() ?? ''),
+                        'nombre'     => $this->decodeHeaderValue((string)($message->getFrom()->first()?->personal ?? '')),
+                        'asunto'     => $this->decodeHeaderValue((string)($message->getSubject()->first() ?? '')),
                         'fecha'      => $message->getDate()->first()?->toDateTime()?->format('Y-m-d') ?? '',
                         'cuenta_idx' => $idx,
                     ];
@@ -317,6 +364,11 @@ class EmailImportService
             if (isset($headers[$selIdx])) {
                 $resultado[] = $headers[$selIdx];
             }
+        }
+
+        // Gemini respondio bien: los no seleccionados se recuerdan.
+        foreach (array_diff(array_keys($headers), $seleccionados) as $descartado) {
+            $this->marcarRevisado((string) ($headers[$descartado]['message_id'] ?? ''), 'no_postulacion');
         }
 
         return $resultado;
@@ -365,5 +417,23 @@ class EmailImportService
 
         $client->disconnect();
         return $resultado;
+    }
+
+    private function decodeHeaderValue(?string $value): string
+    {
+        if (empty($value)) {
+            return '';
+        }
+        if (str_contains($value, '=?')) {
+            $decoded = @iconv_mime_decode($value, ICONV_MIME_DECODE_CONTINUE_ON_ERROR, 'UTF-8');
+            if ($decoded !== false) {
+                return $decoded;
+            }
+            $decoded = @mb_decode_mimeheader($value);
+            if ($decoded !== false) {
+                return $decoded;
+            }
+        }
+        return $value;
     }
 }

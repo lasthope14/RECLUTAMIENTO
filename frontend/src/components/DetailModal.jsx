@@ -440,6 +440,11 @@ export default function DetailModal({ postulacion: postulacionInicial, perfiles:
   const [estado, setEstado]     = useState(postulacionInicial?.estado || 'recibida')
   const [perfilId, setPerfilId] = useState(postulacionInicial?.perfil_cargo_id || '')
   const [notas, setNotas]       = useState(postulacionInicial?.notas_hr || '')
+  const [marcada, setMarcada]   = useState(postulacionInicial?.marcada || false)
+  const [comentarios, setComentarios] = useState(postulacionInicial?.comentarios || [])
+  const [nuevoComentario, setNuevoComentario] = useState('')
+  const [guardandoComentario, setGuardandoComentario] = useState(false)
+  const [togglingMarca, setTogglingMarca] = useState(false)
   const [saving, setSaving]     = useState(false)
   const [msg, setMsg]           = useState('')
   const [perfiles, setPerfiles] = useState(perfilesProp || [])
@@ -473,6 +478,8 @@ export default function DetailModal({ postulacion: postulacionInicial, perfiles:
       setEstado(p.estado || 'recibida')
       setPerfilId(p.perfil_cargo_id || '')
       setNotas(p.notas_hr || '')
+      setMarcada(p.marcada || false)
+      setComentarios(p.comentarios || [])
       if (prRes.status === 'fulfilled') setPerfiles(prRes.value.data)
       if (plRes.status === 'fulfilled') {
         const pls = plRes.value.data
@@ -487,17 +494,107 @@ export default function DetailModal({ postulacion: postulacionInicial, perfiles:
     }).finally(() => setLoading(false))
   }, [postulacionInicial?.id])
 
-  const reload = () => api.get(`/postulaciones/${postulacion.id}`).then(r => { setPostulacion(r.data); setEstado(r.data.estado || 'recibida') })
+  const reload = () => api.get(`/postulaciones/${postulacion.id}`).then(r => {
+    setPostulacion(r.data)
+    setEstado(r.data.estado || 'recibida')
+    setMarcada(r.data.marcada || false)
+    setComentarios(r.data.comentarios || [])
+  })
+
+  const toggleMarca = async () => {
+    setTogglingMarca(true)
+    try {
+      const res = await api.patch(`/postulaciones/${postulacion.id}/marca`, { marcada: !marcada })
+      setMarcada(res.data.marcada)
+      if (onUpdated) onUpdated()
+    } catch { /* noop */ }
+    finally { setTogglingMarca(false) }
+  }
+
+  const agregarComentario = async () => {
+    const texto = nuevoComentario.trim()
+    if (!texto) return
+    setGuardandoComentario(true)
+    try {
+      const res = await api.post(`/postulaciones/${postulacion.id}/comentarios`, { comentario: texto })
+      setComentarios(c => [res.data, ...c])
+      setNuevoComentario('')
+    } catch { /* noop */ }
+    finally { setGuardandoComentario(false) }
+  }
+
+  const eliminarComentario = async (id) => {
+    try {
+      await api.delete(`/postulaciones/${postulacion.id}/comentarios/${id}`)
+      setComentarios(c => c.filter(x => x.id !== id))
+    } catch { /* noop */ }
+  }
+
+  const fechaComentario = (iso) => {
+    try {
+      return new Date(iso).toLocaleString('es-CO', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+    } catch { return '' }
+  }
+
+  /* Rellena el compositor con la plantilla que corresponde al estado, sin
+     abrirlo. El envío del correo siempre lo decide la persona con el switch. */
+  const prellenarPlantilla = (tipo) => {
+    const plant = plantillas.find(p => p.tipo === tipo);
+    if (!plant) return;
+    const cargoNombre = postulacion?.perfil_cargo?.nombre || 'Cargo Técnico';
+    const cuerpoCompilado = plant.cuerpo
+      .replace(/\{\{nombre\}\}/g, postulacion?.nombre_completo || '')
+      .replace(/\{\{cargo\}\}/g, cargoNombre);
+    setEmailForm({ asunto: plant.asunto, cuerpo: cuerpoCompilado, tipo: plant.tipo });
+  }
+
+  /* Tipo de plantilla sugerida para cada estado; null = sin correo asociado. */
+  const tipoPlantillaDeEstado = (est) =>
+    est === 'preseleccionado' ? 'preseleccion'
+    : est === 'descartado'    ? 'rechazo'
+    : null
+
+  const handleStateChange = (newEstado) => {
+    setEstado(newEstado);
+
+    // El correo nunca es obligatorio: se deja listo, pero apagado.
+    setShowEmail(false);
+    const tipo = tipoPlantillaDeEstado(newEstado);
+    if (tipo) prellenarPlantilla(tipo);
+  }
 
   const save = async () => {
     setSaving(true); setMsg('')
     try {
       await api.patch(`/postulaciones/${postulacion.id}`, { estado, perfil_cargo_id: perfilId || null, notas_hr: notas })
       setMsg('✅ Cambios guardados')
+      setShowEmail(false)
+      await reload()
       if (onUpdated) onUpdated()
       setTimeout(() => setMsg(''), 3000)
     } catch { setMsg('❌ Error al guardar') }
     finally { setSaving(false) }
+  }
+
+  const saveAndSend = async () => {
+    setSaving(true); setSendingEmail(true); setMsg('')
+    try {
+      // 1. Guardar primero el estado, cargo operativo y notas en la base de datos
+      await api.patch(`/postulaciones/${postulacion.id}`, { estado, perfil_cargo_id: perfilId || null, notas_hr: notas })
+      
+      // 2. Enviar el correo electrónico personalizado
+      await api.post('/notificaciones/enviar', { postulacion_id: postulacion.id, ...emailForm })
+      
+      setMsg('✅ Estado guardado y correo enviado con éxito')
+      setShowEmail(false)
+      await reload()
+      if (onUpdated) onUpdated()
+      setTimeout(() => setMsg(''), 4000)
+    } catch (e) {
+      setMsg('❌ Error en el proceso: ' + (e.response?.data?.message || 'Reintente'))
+    } finally {
+      setSaving(false); setSendingEmail(false)
+    }
   }
 
   const procesarIa = async () => {
@@ -966,41 +1063,266 @@ export default function DetailModal({ postulacion: postulacionInicial, perfiles:
                     <div className="lg:col-span-2 card space-y-6">
                       <h3 className="text-xs font-extrabold text-slate-850 uppercase tracking-wider border-b border-slate-200 pb-3.5">Estado y Observaciones de Selección</h3>
 
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                      <div className="grid grid-cols-1 gap-6">
+                        
+                        {/* Grilla de Tarjetas de Estado Premium */}
                         <div>
-                          <label className="label">Estado del Candidato</label>
-                          <select className="select" value={estado} onChange={e => setEstado(e.target.value)}>
-                            {ESTADOS.map(e => <option key={e} value={e} className="bg-white text-slate-700">{statusLabel[e] || e}</option>)}
-                          </select>
+                          <label className="label mb-2.5 block text-slate-700 font-extrabold">Acción / Estado del Candidato</label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3.5">
+                            
+                            {/* 1. Revisado */}
+                            <button
+                              type="button"
+                              onClick={() => handleStateChange('en_revision')}
+                              className={`p-4 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[110px] relative ${
+                                estado === 'en_revision' || estado === 'recibida'
+                                  ? 'border-blue-600 bg-blue-50/30 shadow-sm ring-1 ring-blue-600/30'
+                                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-100/50 bg-white'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <span className={`p-1.5 rounded-xl ${estado === 'en_revision' || estado === 'recibida' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                  <IconTime className="w-4 h-4" />
+                                </span>
+                                {(estado === 'en_revision' || estado === 'recibida') && (
+                                  <span className="text-blue-600 font-extrabold text-[10px] tracking-wider uppercase">Activo</span>
+                                )}
+                              </div>
+                              <div className="mt-3">
+                                <h4 className="font-extrabold text-xs text-slate-800">Revisado (En Espera)</h4>
+                                <p className="text-[10px] text-slate-400 font-semibold leading-normal mt-0.5">Queda guardado en cartera de talento de Hidroobras.</p>
+                              </div>
+                            </button>
+
+                            {/* 2. Preseleccionado */}
+                            <button
+                              type="button"
+                              onClick={() => handleStateChange('preseleccionado')}
+                              className={`p-4 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[110px] relative ${
+                                estado === 'preseleccionado'
+                                  ? 'border-brand-600 bg-brand-50/30 shadow-sm ring-1 ring-brand-600/30'
+                                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-100/50 bg-white'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <span className={`p-1.5 rounded-xl ${estado === 'preseleccionado' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                  <IconCheck className="w-4 h-4" />
+                                </span>
+                                {estado === 'preseleccionado' && (
+                                  <span className="text-brand-700 font-extrabold text-[10px] tracking-wider uppercase">Seleccionado</span>
+                                )}
+                              </div>
+                              <div className="mt-3">
+                                <h4 className="font-extrabold text-xs text-slate-800">Preseleccionado</h4>
+                                <p className="text-[10px] text-slate-400 font-semibold leading-normal mt-0.5">Avanza en el proceso. Notificar por correo es opcional.</p>
+                              </div>
+                            </button>
+
+                            {/* 3. Contratado */}
+                            <button
+                              type="button"
+                              onClick={() => handleStateChange('contratado')}
+                              className={`p-4 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[110px] relative ${
+                                estado === 'contratado'
+                                  ? 'border-emerald-600 bg-emerald-50/30 shadow-sm ring-1 ring-emerald-600/30'
+                                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-100/50 bg-white'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <span className={`p-1.5 rounded-xl ${estado === 'contratado' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                  <IconCert className="w-4 h-4" />
+                                </span>
+                                {estado === 'contratado' && (
+                                  <span className="text-emerald-600 font-extrabold text-[10px] tracking-wider uppercase">Contratado</span>
+                                )}
+                              </div>
+                              <div className="mt-3">
+                                <h4 className="font-extrabold text-xs text-slate-800">Contratado</h4>
+                                <p className="text-[10px] text-slate-400 font-semibold leading-normal mt-0.5">Cierre del proceso por incorporación a Hidroobras.</p>
+                              </div>
+                            </button>
+
+                            {/* 4. Descartado */}
+                            <button
+                              type="button"
+                              onClick={() => handleStateChange('descartado')}
+                              className={`p-4 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[110px] relative ${
+                                estado === 'descartado'
+                                  ? 'border-red-655 bg-red-50/30 shadow-sm ring-1 ring-red-655/30'
+                                  : 'border-slate-200 hover:border-slate-300 hover:bg-slate-100/50 bg-white'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between w-full">
+                                <span className={`p-1.5 rounded-xl ${estado === 'descartado' ? 'bg-red-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                                  <IconClose className="w-4 h-4" />
+                                </span>
+                                {estado === 'descartado' && (
+                                  <span className="text-red-600 font-extrabold text-[10px] tracking-wider uppercase">Descartado</span>
+                                )}
+                              </div>
+                              <div className="mt-3">
+                                <h4 className="font-extrabold text-xs text-slate-800">Descartado</h4>
+                                <p className="text-[10px] text-slate-400 font-semibold leading-normal mt-0.5">No continúa. Opción de enviar correo de agradecimiento.</p>
+                              </div>
+                            </button>
+                          </div>
                         </div>
-                        <div>
-                          <label className="label">Cargo Operativo Asignado</label>
-                          <select className="select" value={perfilId} onChange={e => setPerfilId(e.target.value)}>
-                            <option value="" className="bg-white text-slate-700">Sin asignar</option>
-                            {(perfiles || []).map(p => <option key={p.id} value={p.id} className="bg-white text-slate-700">{p.nombre}</option>)}
-                          </select>
+
+                        {/* Switch de notificación: el correo es opcional tanto al
+                            preseleccionar como al descartar. */}
+                        {tipoPlantillaDeEstado(estado) && (
+                          <div className={`border rounded-2xl p-4 flex items-center justify-between gap-4 animate-fade-in ${
+                            estado === 'descartado' ? 'bg-red-50/40 border-red-200/50' : 'bg-brand-50/40 border-brand-200/50'
+                          }`}>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-xs font-extrabold text-slate-855">
+                                {estado === 'descartado'
+                                  ? '¿Deseas enviar un correo de descarte formal?'
+                                  : '¿Deseas notificar al candidato por correo?'}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-semibold">
+                                {!postulacion.email
+                                  ? 'Este candidato no tiene correo registrado; solo puedes guardar el estado.'
+                                  : estado === 'descartado'
+                                    ? 'Se redactará automáticamente una plantilla de cortesía y agradecimiento. Si lo dejas apagado, solo se guarda el estado.'
+                                    : 'Si lo dejas apagado, el candidato queda guardado como preseleccionado sin enviarle ningún correo.'}
+                              </span>
+                            </div>
+                            <label className={`relative inline-flex items-center select-none ${postulacion.email ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}`}>
+                              <input
+                                type="checkbox"
+                                checked={showEmail}
+                                disabled={!postulacion.email}
+                                onChange={e => {
+                                  setShowEmail(e.target.checked);
+                                  if (e.target.checked) prellenarPlantilla(tipoPlantillaDeEstado(estado));
+                                }}
+                                className="sr-only peer"
+                              />
+                              <div className={`w-9 h-5 bg-slate-200 rounded-full peer peer-focus:ring-2 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${
+                                estado === 'descartado'
+                                  ? 'peer-focus:ring-red-500/20 peer-checked:bg-red-600'
+                                  : 'peer-focus:ring-brand-500/20 peer-checked:bg-brand-600'
+                              }`}></div>
+                            </label>
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                          <div className="md:col-span-2">
+                            <label className="label">Cargo Operativo Asignado</label>
+                            <select className="select" value={perfilId} onChange={e => setPerfilId(e.target.value)}>
+                              <option value="" className="bg-white text-slate-700">Sin asignar</option>
+                              {(perfiles || []).map(p => <option key={p.id} value={p.id} className="bg-white text-slate-700">{p.nombre}</option>)}
+                            </select>
+                          </div>
+                          
+                          <div className="md:col-span-2">
+                            <label className="label">Notas y Observaciones Internas</label>
+                            <textarea className="input min-h-[120px] text-xs font-normal" value={notas}
+                              onChange={e => setNotas(e.target.value)}
+                              placeholder="Resultados de entrevistas, pretensiones salariales, compromisos, aptitudes o valoraciones técnicas adicionales..." />
+                          </div>
+
+                          {/* Marca especial (independiente del flujo del proceso) */}
+                          <div className="md:col-span-2">
+                            <div className={`flex items-center justify-between gap-4 rounded-2xl border p-4 transition-colors ${marcada ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-slate-50'}`}>
+                              <div className="flex items-center gap-3">
+                                <span className={`p-2 rounded-xl ${marcada ? 'bg-amber-400 text-white' : 'bg-slate-200 text-slate-500'}`}>
+                                  <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg>
+                                </span>
+                                <div>
+                                  <p className="text-xs font-extrabold text-slate-900">Marcar hoja de vida</p>
+                                  <p className="text-[11px] text-slate-500 font-semibold">{marcada ? 'Marcada para seguimiento especial.' : 'Resáltala para revisarla aparte del flujo del proceso.'}</p>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={toggleMarca}
+                                disabled={togglingMarca}
+                                className={`text-xs font-bold rounded-lg px-3.5 py-2 transition-colors disabled:opacity-50 ${marcada ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-100'}`}
+                              >
+                                {marcada ? 'Quitar marca' : 'Marcar'}
+                              </button>
+                            </div>
+                          </div>
                         </div>
-                        <div className="md:col-span-2">
-                          <label className="label">Notas y Observaciones Internas</label>
-                          <textarea className="input min-h-[140px] text-xs font-normal" value={notas}
-                            onChange={e => setNotas(e.target.value)}
-                            placeholder="Resultados de entrevistas, pretensiones salariales, compromisos, aptitudes o valoraciones técnicas adicionales..." />
-                        </div>
+
                       </div>
+
+                      {/* Compositor de Correo Integrado */}
+                      {showEmail && (
+                        <div className="border border-brand-200/60 bg-brand-50/10 rounded-2xl p-5 space-y-4 animate-slide-up mt-4">
+                          <h4 className="text-[11px] font-bold text-brand-700 uppercase tracking-wider flex items-center gap-2 border-b border-brand-200/50 pb-2">
+                            <IconEmail className="w-4 h-4 text-brand-600" />
+                            Enviar Notificación Formal al Candidato
+                          </h4>
+                          
+                          <div className="grid grid-cols-1 gap-4">
+                            <div>
+                              <label className="label">Plantilla del Proceso</label>
+                              <select 
+                                className="select" 
+                                value={emailForm.tipo}
+                                onChange={e => { 
+                                  const p = plantillas.find(p => p.tipo === e.target.value); 
+                                  if (p) {
+                                    const cargoNombre = postulacion?.perfil_cargo?.nombre || 'Cargo Técnico';
+                                    const cuerpoCompilado = p.cuerpo
+                                      .replace(/\{\{nombre\}\}/g, postulacion.nombre_completo || '')
+                                      .replace(/\{\{cargo\}\}/g, cargoNombre);
+                                    setEmailForm({ asunto: p.asunto, cuerpo: cuerpoCompilado, tipo: p.tipo });
+                                  }
+                                }}
+                              >
+                                {plantillas.map(p => <option key={p.tipo} value={p.tipo} className="bg-white text-slate-700">{p.tipo.replace('_', ' ').toUpperCase()}</option>)}
+                              </select>
+                            </div>
+                            
+                            <div>
+                              <label className="label">Asunto del Correo</label>
+                              <input className="input" value={emailForm.asunto} onChange={e => setEmailForm(f => ({ ...f, asunto: e.target.value }))} />
+                            </div>
+                            
+                            <div>
+                              <label className="label">Cuerpo de Mensaje (Texto Plano - Redacta Libremente)</label>
+                              <textarea 
+                                className="input font-sans text-xs min-h-[160px] leading-relaxed" 
+                                value={emailForm.cuerpo} 
+                                onChange={e => setEmailForm(f => ({ ...f, cuerpo: e.target.value }))} 
+                                placeholder="Escribe aquí el cuerpo del mensaje..."
+                              />
+                              <span className="text-[10px] text-slate-400 font-semibold block mt-1">
+                                Nota: El mensaje se enviará automáticamente con la tipografía formal, logo y firma de Hidroobras S.A.S.
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
 
                       <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-200">
                         {msg && <p className={`text-xs font-bold ${msg.startsWith('✅') ? 'text-brand-600' : 'text-red-400'}`}>{msg}</p>}
+                        {/* Guardar siempre está disponible; enviar el correo es un
+                            paso aparte que solo aparece si se activó el switch. */}
                         <div className="flex gap-2.5 ml-auto">
-                          {postulacion.email && (
-                            <button onClick={() => setShowEmail(v => !v)} className="btn-secondary text-xs font-semibold !py-2 !px-3.5">
-                              <IconEmail className="w-3.5 h-3.5 inline mr-1" />
-                              {showEmail ? 'Cerrar Correo' : 'Notificar por Correo'}
+                          <button
+                            onClick={save}
+                            disabled={saving || sendingEmail}
+                            className={`text-xs font-bold shadow-md !py-2 !px-4 ${showEmail ? 'btn-secondary' : 'btn-primary'}`}
+                          >
+                            <IconSave className="w-3.5 h-3.5 inline mr-1" />
+                            {saving && !sendingEmail ? 'Guardando...' : (showEmail ? 'Guardar sin enviar' : 'Guardar Cambios')}
+                          </button>
+                          {showEmail && (
+                            <button
+                              onClick={saveAndSend}
+                              disabled={saving || sendingEmail}
+                              className="btn-primary text-xs font-bold shadow-md !py-2 !px-4 flex items-center gap-1.5"
+                            >
+                              <IconEmail className="w-3.5 h-3.5" />
+                              {sendingEmail ? 'Procesando...' : 'Guardar Estado y Enviar'}
                             </button>
                           )}
-                          <button onClick={save} disabled={saving} className="btn-primary text-xs font-bold shadow-md !py-2 !px-4">
-                            <IconSave className="w-3.5 h-3.5 inline mr-1" />
-                            {saving ? 'Guardando...' : 'Guardar Cambios'}
-                          </button>
                         </div>
                       </div>
                     </div>
@@ -1032,40 +1354,64 @@ export default function DetailModal({ postulacion: postulacionInicial, perfiles:
 
                   </div>
 
-                  {/* Panel de Enviar Correo en Bloque Separado */}
-                  {showEmail && (
-                    <div className="card space-y-4 animate-slide-up mt-6 max-w-3xl">
-                      <h4 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider border-b border-slate-200 pb-3 flex items-center gap-2">
-                        <IconEmail className="w-4 h-4 text-brand-400" />
-                        Enviar Notificación Formal al Candidato
-                      </h4>
-                      
-                      <div className="grid grid-cols-1 gap-4">
-                        <div>
-                          <label className="label">Plantilla del Proceso</label>
-                          <select className="select" onChange={e => { const p = plantillas.find(p => p.tipo === e.target.value); if (p) setEmailForm({ asunto: p.asunto, cuerpo: p.cuerpo.replace('{{nombre}}', postulacion.nombre_completo), tipo: p.tipo }) }}>
-                            {plantillas.map(p => <option key={p.tipo} value={p.tipo} className="bg-white text-slate-700">{p.tipo.replace('_', ' ').toUpperCase()}</option>)}
-                          </select>
-                        </div>
-                        <div>
-                          <label className="label">Asunto del Correo</label>
-                          <input className="input" value={emailForm.asunto} onChange={e => setEmailForm(f => ({ ...f, asunto: e.target.value }))} />
-                        </div>
-                        <div>
-                          <label className="label">Cuerpo de Mensaje (Editable)</label>
-                          <textarea className="input font-mono text-xs min-h-[160px] leading-relaxed" value={emailForm.cuerpo} onChange={e => setEmailForm(f => ({ ...f, cuerpo: e.target.value }))} />
-                        </div>
-                      </div>
-                      
-                      <div className="flex justify-end gap-2 pt-4 border-t border-slate-200">
-                        <button onClick={() => setShowEmail(false)} className="btn-secondary text-xs font-semibold !py-2 !px-4">Cancelar</button>
-                        <button onClick={sendEmail} disabled={sendingEmail} className="btn-primary text-xs font-bold shadow-md !py-2 !px-4">
-                          <IconEmail className="w-3.5 h-3.5 inline mr-1" />
-                          {sendingEmail ? 'Enviando...' : 'Enviar Correo'}
+                  {/* ── Hilo de comentarios con autor y fecha ── */}
+                  <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+                    <h4 className="text-xs font-extrabold text-slate-900 uppercase tracking-wider mb-4 border-b border-slate-200 pb-2.5 flex items-center gap-2">
+                      <svg className="w-4 h-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                      Comentarios y observaciones
+                      {comentarios.length > 0 && (
+                        <span className="ml-1 bg-slate-100 text-slate-600 text-[10px] font-bold px-2 py-0.5 rounded-full">{comentarios.length}</span>
+                      )}
+                    </h4>
+
+                    <div className="flex flex-col gap-2 mb-5">
+                      <textarea
+                        className="input min-h-[70px] text-xs font-normal"
+                        value={nuevoComentario}
+                        onChange={e => setNuevoComentario(e.target.value)}
+                        placeholder="Escribe un comentario sobre este candidato (entrevistas, llamadas, acuerdos...)"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={agregarComentario}
+                          disabled={guardandoComentario || !nuevoComentario.trim()}
+                          className="btn-primary text-xs font-bold !py-2 !px-4 disabled:opacity-50"
+                        >
+                          {guardandoComentario ? 'Publicando...' : 'Agregar comentario'}
                         </button>
                       </div>
                     </div>
-                  )}
+
+                    {comentarios.length === 0 ? (
+                      <p className="text-xs text-slate-400 font-semibold text-center py-4">Aún no hay comentarios en esta hoja de vida.</p>
+                    ) : (
+                      <ul className="space-y-3">
+                        {comentarios.map(c => (
+                          <li key={c.id} className="group bg-slate-50 border border-slate-200 rounded-xl p-3.5">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="w-6 h-6 rounded-full bg-gradient-to-br from-brand-500 to-brand-700 text-white text-[10px] font-bold flex items-center justify-center">
+                                  {(c.autor_nombre || c.user?.name || '?').charAt(0).toUpperCase()}
+                                </span>
+                                <span className="text-xs font-extrabold text-slate-800">{c.autor_nombre || c.user?.name || 'Usuario'}</span>
+                                <span className="text-[10px] text-slate-400 font-semibold">· {fechaComentario(c.created_at)}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => eliminarComentario(c.id)}
+                                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 transition-all"
+                                title="Eliminar comentario"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                              </button>
+                            </div>
+                            <p className="text-xs text-slate-700 font-normal leading-relaxed whitespace-pre-wrap pl-8">{c.comentario}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
 
                 </div>
               )}

@@ -50,7 +50,9 @@ return [
     |
     */
 
-    'expiration' => null,
+    // 8 horas, igual que Hidroobras ID. Sin vencimiento, desactivar a alguien
+    // en Hidroobras ID no le quitaba el acceso: su token servia para siempre.
+    'expiration' => (int) env('SANCTUM_EXPIRATION', 480),
 
     /*
     |--------------------------------------------------------------------------

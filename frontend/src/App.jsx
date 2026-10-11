@@ -4,7 +4,12 @@ import Layout from './components/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Postulaciones from './pages/Postulaciones'
+import Seleccion from './pages/Seleccion'
+import Alertas from './pages/Alertas'
 import PerfilesCargo from './pages/PerfilesCargo'
+import AsistenteIa from './pages/AsistenteIa'
+import Usuarios from './pages/Usuarios'
+import PlantillaCortesia from './pages/PlantillaCortesia'
 
 const queryClient = new QueryClient()
 
@@ -23,10 +28,15 @@ export default function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="postulaciones" element={<Postulaciones />} />
+            <Route path="seleccion" element={<Seleccion />} />
+            <Route path="alertas" element={<Alertas />} />
+            <Route path="asistente-ia" element={<AsistenteIa />} />
             {/* Alias legados */}
             <Route path="candidatos" element={<Navigate to="/postulaciones" replace />} />
             <Route path="evaluacion-ia" element={<Navigate to="/postulaciones" replace />} />
             <Route path="perfiles-cargo" element={<PerfilesCargo />} />
+            <Route path="usuarios" element={<Usuarios />} />
+            <Route path="plantilla-cortesia" element={<PlantillaCortesia />} />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

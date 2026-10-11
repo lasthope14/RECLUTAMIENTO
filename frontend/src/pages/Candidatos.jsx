@@ -5,7 +5,8 @@ import DetailModal from '../components/DetailModal'
 export default function Candidatos() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [filters, setFilters] = useState({ search: '', page: 1, per_page: 12 })
+  const [filters, setFilters] = useState({ search: '', ciudad: '', marcada: false, page: 1, per_page: 12 })
+  const [ciudades, setCiudades] = useState([])
   const [selected, setSelected] = useState(null)
   const debounce = useRef(null)
 
@@ -20,6 +21,12 @@ export default function Candidatos() {
       if (filters.search) {
         params.search = filters.search
       }
+      if (filters.ciudad) {
+        params.ciudad = filters.ciudad
+      }
+      if (filters.marcada) {
+        params.marcada = 1
+      }
       const res = await api.get('/postulaciones', { params })
       setData(res.data)
     } catch (err) {
@@ -33,6 +40,12 @@ export default function Candidatos() {
     clearTimeout(debounce.current)
     debounce.current = setTimeout(load, 300)
   }, [filters])
+
+  useEffect(() => {
+    api.get('/postulaciones/ciudades')
+      .then(res => setCiudades(res.data || []))
+      .catch(err => console.error(err))
+  }, [])
 
   const openDetail = async (id) => {
     const res = await api.get(`/postulaciones/${id}`)
@@ -60,12 +73,33 @@ export default function Candidatos() {
           <h1 className="section-title">Candidatos Evaluados</h1>
           <p className="section-sub">{data?.total ?? 0} perfiles procesados por IA</p>
         </div>
-        <input
-          className="input w-64"
-          placeholder="Buscar candidato..."
-          value={filters.search}
-          onChange={e => setFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
-        />
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setFilters(f => ({ ...f, marcada: !f.marcada, page: 1 }))}
+            className={`text-sm font-bold rounded-lg px-3 py-2 border transition-colors flex items-center gap-1.5 ${filters.marcada ? 'bg-amber-500 border-amber-500 text-white' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
+            title="Mostrar solo hojas de vida marcadas"
+          >
+            <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg>
+            Marcadas
+          </button>
+          <select
+            className="select w-52"
+            value={filters.ciudad}
+            onChange={e => setFilters(f => ({ ...f, ciudad: e.target.value, page: 1 }))}
+          >
+            <option value="">Todas las ciudades</option>
+            {ciudades.map(c => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <input
+            className="input w-64"
+            placeholder="Buscar candidato..."
+            value={filters.search}
+            onChange={e => setFilters(f => ({ ...f, search: e.target.value, page: 1 }))}
+          />
+        </div>
       </div>
 
       {loading ? (
@@ -83,7 +117,7 @@ export default function Candidatos() {
                 <div
                   key={p.id}
                   onClick={() => openDetail(p.id)}
-                  className="card cursor-pointer hover:border-brand-500/40 hover:bg-slate-50/50 hover:shadow-card-hover transition-all duration-200 group flex flex-col justify-between h-full relative overflow-hidden"
+                  className={`card cursor-pointer hover:border-brand-500/40 hover:bg-slate-50/50 hover:shadow-card-hover transition-all duration-200 group flex flex-col justify-between h-full relative overflow-hidden ${p.marcada ? 'ring-1 ring-amber-300' : ''}`}
                 >
                   {/* Badge de Score si existe */}
                   {ev && (
@@ -101,10 +135,22 @@ export default function Candidatos() {
                         {p.nombre_completo?.charAt(0)?.toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="font-semibold text-slate-800 group-hover:text-brand-600 transition-colors truncate">
-                          {p.nombre_completo}
+                        <p className="font-semibold text-slate-800 group-hover:text-brand-600 transition-colors truncate flex items-center gap-1.5">
+                          {p.marcada && (
+                            <svg className="w-3.5 h-3.5 text-amber-500 fill-current flex-shrink-0" viewBox="0 0 20 20" title="Marcada"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg>
+                          )}
+                          <span className="truncate">{p.nombre_completo}</span>
                         </p>
                         <p className="text-xs text-slate-700 font-semibold truncate">{p.email}</p>
+                        {(p.ciudad || d.ciudad) && (
+                          <p className="text-xs text-slate-600 font-semibold truncate flex items-center gap-1 mt-0.5">
+                            <svg className="w-3 h-3 text-brand-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                            </svg>
+                            {p.ciudad || d.ciudad}
+                          </p>
+                        )}
                       </div>
                     </div>
 

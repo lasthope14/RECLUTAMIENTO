@@ -1,11 +1,32 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import api from '../services/api'
 
+// Ventana emergente, como "Iniciar sesion con Google". Si el navegador la
+// bloquea, el enlace sigue su curso normal y el ingreso se hace con redireccion.
+function abrirHidroobrasId(evento) {
+  const ancho = 480
+  const alto = 640
+  const izquierda = window.screenX + (window.outerWidth - ancho) / 2
+  const arriba = window.screenY + (window.outerHeight - alto) / 2
+
+  const ventana = window.open(
+    '/auth/hidroobras?popup=1',
+    'hidroobras_id',
+    `width=${ancho},height=${alto},left=${izquierda},top=${arriba}`
+  )
+
+  if (ventana) {
+    evento.preventDefault()
+    ventana.focus()
+  }
+}
+
 export default function Login() {
+  const [searchParams] = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
+  const [error, setError] = useState(searchParams.get('sso_error') || '')
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
 
@@ -54,6 +75,24 @@ export default function Login() {
               {error}
             </div>
           )}
+
+          <a
+            href="/auth/hidroobras"
+            id="btn-hidroobras-id"
+            onClick={abrirHidroobrasId}
+            className="btn-primary w-full justify-center py-2.5"
+          >
+            Entrar con Hidroobras ID
+          </a>
+          <p className="text-center text-xs text-surface-400 mt-2">
+            Con el mismo usuario y contraseña de tu correo
+          </p>
+
+          <div className="flex items-center gap-3 my-6">
+            <div className="flex-1 border-t border-surface-200" />
+            <span className="text-xs text-surface-400">o con tu contraseña de esta aplicación</span>
+            <div className="flex-1 border-t border-surface-200" />
+          </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>

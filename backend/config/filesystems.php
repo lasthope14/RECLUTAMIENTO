@@ -38,6 +38,22 @@ return [
             'report' => false,
         ],
 
+        // Documentos de ingreso de los aspirantes. Los escribe Apache (wwwrun)
+        // y los lee el worker de la cola de vinculación (PM2, otro usuario del
+        // grupo www): por eso son del grupo y no solo del dueño. La carpeta
+        // raíz lleva setgid (2770) para que todo lo nuevo quede en el grupo www.
+        'documentos' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/documentos_aspirante'),
+            'visibility' => 'private',
+            'permissions' => [
+                'file' => ['public' => 0664, 'private' => 0660],
+                'dir' => ['public' => 0775, 'private' => 0770],
+            ],
+            'throw' => false,
+            'report' => false,
+        ],
+
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),

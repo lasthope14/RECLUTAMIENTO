@@ -22,3 +22,12 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Copias de respaldo del .env (contienen credenciales)
+.env.bak*
+
+# Frontend compilado (se genera con `pnpm build` en frontend/)
+/public/assets
+/public/index.html
+/public/favicon.svg
+/public/icons.svg

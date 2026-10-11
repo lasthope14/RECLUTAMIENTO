@@ -28,6 +28,7 @@ class PerfilCargoController extends Controller
         $validated = $request->validate([
             'nombre'        => 'required|string|max:255',
             'area'          => 'nullable|string|max:255',
+            'ciudad'        => 'nullable|string|max:255',
             'descripcion'   => 'nullable|string',
             'requisitos'    => 'nullable|array',
             'salario_rango' => 'nullable|string|max:100',
@@ -52,6 +53,7 @@ class PerfilCargoController extends Controller
         $validated = $request->validate([
             'nombre'        => 'sometimes|string|max:255',
             'area'          => 'nullable|string|max:255',
+            'ciudad'        => 'nullable|string|max:255',
             'descripcion'   => 'nullable|string',
             'requisitos'    => 'nullable|array',
             'salario_rango' => 'nullable|string|max:100',

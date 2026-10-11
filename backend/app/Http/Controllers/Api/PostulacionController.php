@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessCvJob;
 use App\Models\Candidato;
+use App\Models\DocumentoAspirante;
 use App\Models\EvaluacionIa;
 use App\Models\PerfilCargo;
 use App\Models\Postulacion;
 use App\Services\GeminiService;
+use App\Services\ProcesoSeleccionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -24,7 +26,7 @@ class PostulacionController extends Controller
     public function index(Request $request): JsonResponse
     {
         $query = Postulacion::with([
-                'perfilCargo:id,nombre',
+                'perfilCargo:id,nombre,ciudad',
                 'candidato:id,postulacion_id,estado_parseo,resumen_ia,datos_extraidos',
                 'candidato.evaluaciones:id,candidato_id,perfil_cargo_id,puntaje_total,puntaje_educacion,puntaje_experiencia,puntaje_habilidades,puntaje_perfil_general,recomendacion',
             ])->latest('fecha_recepcion');
@@ -37,6 +39,12 @@ class PostulacionController extends Controller
         }
         if ($request->filled('fuente')) {
             $query->where('fuente', $request->fuente);
+        }
+        if ($request->filled('ciudad')) {
+            $query->where('ciudad', $request->ciudad);
+        }
+        if ($request->boolean('marcada')) {
+            $query->where('marcada', true);
         }
         if ($request->filled('search')) {
             $s = $request->search;
@@ -71,6 +79,17 @@ class PostulacionController extends Controller
         $perPage = min((int) $request->input('per_page', 20), 500);
 
         return response()->json($query->paginate($perPage));
+    }
+
+    public function ciudades(): JsonResponse
+    {
+        $ciudades = Postulacion::whereNotNull('ciudad')
+            ->where('ciudad', '!=', '')
+            ->distinct()
+            ->orderBy('ciudad')
+            ->pluck('ciudad');
+
+        return response()->json($ciudades);
     }
 
     public function store(Request $request): JsonResponse
@@ -118,8 +137,47 @@ class PostulacionController extends Controller
             'perfilCargo',
             'candidato.evaluaciones.perfilCargo',
             'emailLogs',
+            'comentarios.user:id,name',
         ]);
         return response()->json($postulacion);
+    }
+
+    public function toggleMarca(Request $request, Postulacion $postulacion): JsonResponse
+    {
+        $marcada = $request->has('marcada')
+            ? $request->boolean('marcada')
+            : !$postulacion->marcada;
+
+        $postulacion->update(['marcada' => $marcada]);
+
+        return response()->json(['marcada' => $postulacion->marcada]);
+    }
+
+    public function agregarComentario(Request $request, Postulacion $postulacion): JsonResponse
+    {
+        $validated = $request->validate([
+            'comentario' => 'required|string|max:5000',
+        ]);
+
+        $user = $request->user();
+
+        $comentario = $postulacion->comentarios()->create([
+            'user_id'      => $user?->id,
+            'autor_nombre' => $user?->name,
+            'comentario'   => $validated['comentario'],
+        ]);
+
+        return response()->json($comentario->load('user:id,name'), 201);
+    }
+
+    public function eliminarComentario(Postulacion $postulacion, \App\Models\Comentario $comentario): JsonResponse
+    {
+        if ($comentario->postulacion_id !== $postulacion->id) {
+            return response()->json(['message' => 'Comentario no pertenece a esta postulación'], 404);
+        }
+
+        $comentario->delete();
+        return response()->json(['message' => 'Comentario eliminado']);
     }
 
     public function update(Request $request, Postulacion $postulacion): JsonResponse
@@ -131,9 +189,26 @@ class PostulacionController extends Controller
             'nombre_completo' => 'sometimes|string|max:255',
             'email'           => 'nullable|email',
             'telefono'        => 'nullable|string|max:30',
+            'motivo_descarte' => 'nullable|string|max:2000',
         ]);
 
+        // Descartar a alguien que ya va en el proceso de selección es una
+        // caída en su fase: sin motivo, el indicador no dice nada.
+        $motivo = trim((string) ($validated['motivo_descarte'] ?? ''));
+        unset($validated['motivo_descarte']);
+        if (($validated['estado'] ?? null) === 'descartado' && $postulacion->estado !== 'descartado'
+            && ProcesoSeleccionService::enProceso($postulacion) && $motivo === '') {
+            return response()->json([
+                'message' => 'El aspirante va en el proceso de selección: indique el motivo por el que no continúa.',
+                'errors' => ['motivo_descarte' => ['Indique el motivo del descarte.']],
+            ], 422);
+        }
+
+        $anterior = $postulacion->estado;
         $postulacion->update($validated);
+
+        app(ProcesoSeleccionService::class)->sincronizarConEstado($postulacion, $anterior, $request->user(), $motivo ?: null);
+
         return response()->json($postulacion->fresh(['perfilCargo']));
     }
 
@@ -142,6 +217,8 @@ class PostulacionController extends Controller
         if ($postulacion->archivo_cv) {
             Storage::disk('local')->delete($postulacion->archivo_cv);
         }
+        // Los documentos de ingreso se borran en cascada en la base; sus archivos, aquí.
+        Storage::disk(DocumentoAspirante::DISCO)->deleteDirectory((string) $postulacion->id);
         $postulacion->delete();
         return response()->json(['message' => 'Postulación eliminada']);
     }
@@ -200,13 +277,16 @@ class PostulacionController extends Controller
                 default => 'application/pdf',
             };
 
-            // 1. Parsear CV con Gemini
-            $resultado = $gemini->parsearCV($archivoPath, $mime);
+            // Una sola llamada a Gemini: extrae datos, asigna cargo y evalúa
+            $perfilesActivos = PerfilCargo::where('activo', true)->get()->toArray();
+            $resultado       = $gemini->analizarCV($archivoPath, $mime, $perfilesActivos);
             $datos     = $resultado['datos'];
 
-            // Completar datos básicos de la postulación desde el CV
+            // Completar datos básicos de la postulación desde el CV.
+            // El nombre SIEMPRE se toma de la hoja de vida analizada, no del
+            // remitente del correo (p. ej. la esposa envía el CV del esposo).
             $updates = [];
-            if (!empty($datos['nombre_completo']) && in_array($postulacion->nombre_completo, ['Sin nombre', '', null])) {
+            if (!empty($datos['nombre_completo'])) {
                 $updates['nombre_completo'] = $datos['nombre_completo'];
             }
             if (!empty($datos['email']) && empty($postulacion->email)) {
@@ -214,6 +294,9 @@ class PostulacionController extends Controller
             }
             if (!empty($datos['telefono']) && empty($postulacion->telefono)) {
                 $updates['telefono'] = $datos['telefono'];
+            }
+            if (!empty($datos['ciudad'])) {
+                $updates['ciudad'] = $datos['ciudad'];
             }
             if ($updates) {
                 $postulacion->update($updates);
@@ -227,44 +310,32 @@ class PostulacionController extends Controller
                 'tokens_usados'   => $resultado['tokens'],
             ]);
 
-            // 2. Auto-clasificar al cargo más apropiado
-            $perfilesActivos  = PerfilCargo::where('activo', true)->get()->toArray();
-            $perfilAsignadoId = null;
+            // Auto-clasificar al cargo y guardar la evaluación
+            $perfilAsignadoId = $resultado['perfil_id'];
+            $ev               = $resultado['evaluacion'];
 
-            if (!empty($perfilesActivos)) {
-                $perfilAsignadoId = $gemini->clasificarCandidato($datos, $perfilesActivos);
-                if ($perfilAsignadoId) {
-                    $postulacion->update(['perfil_cargo_id' => $perfilAsignadoId]);
-                }
+            if ($perfilAsignadoId) {
+                $postulacion->update(['perfil_cargo_id' => $perfilAsignadoId]);
             }
 
-            // 3. Evaluar contra el perfil asignado
-            if ($perfilAsignadoId) {
-                $perfil = PerfilCargo::find($perfilAsignadoId);
-                if ($perfil) {
-                    $evalResult = $gemini->evaluarCandidato(
-                        $datos,
-                        $perfil->requisitos ?? [],
-                        $perfil->nombre
-                    );
-                    $ev = $evalResult['evaluacion'];
-                    EvaluacionIa::updateOrCreate(
-                        ['candidato_id' => $candidato->id, 'perfil_cargo_id' => $perfilAsignadoId],
-                        [
-                            'puntaje_total'          => $ev['puntaje_total'],
-                            'puntaje_educacion'      => $ev['puntaje_educacion'],
-                            'puntaje_experiencia'    => $ev['puntaje_experiencia'],
-                            'puntaje_habilidades'    => $ev['puntaje_habilidades'],
-                            'puntaje_perfil_general' => $ev['puntaje_perfil_general'],
-                            'fortalezas'             => $ev['fortalezas'],
-                            'brechas'                => $ev['brechas'],
-                            'justificacion'          => $ev['justificacion'],
-                            'recomendacion'          => $ev['recomendacion'],
-                            'modelo_ia'              => config('services.gemini.model'),
-                            'tokens_usados'          => $evalResult['tokens'],
-                        ]
-                    );
-                }
+            if ($perfilAsignadoId && $ev) {
+                // Los tokens de la llamada quedan contados en el candidato
+                EvaluacionIa::updateOrCreate(
+                    ['candidato_id' => $candidato->id, 'perfil_cargo_id' => $perfilAsignadoId],
+                    [
+                        'puntaje_total'          => $ev['puntaje_total'],
+                        'puntaje_educacion'      => $ev['puntaje_educacion'] ?? 0,
+                        'puntaje_experiencia'    => $ev['puntaje_experiencia'] ?? 0,
+                        'puntaje_habilidades'    => $ev['puntaje_habilidades'] ?? 0,
+                        'puntaje_perfil_general' => $ev['puntaje_perfil_general'] ?? 0,
+                        'fortalezas'             => $ev['fortalezas'] ?? [],
+                        'brechas'                => $ev['brechas'] ?? [],
+                        'justificacion'          => $ev['justificacion'],
+                        'recomendacion'          => $ev['recomendacion'],
+                        'modelo_ia'              => config('services.gemini.model'),
+                        'tokens_usados'          => null,
+                    ]
+                );
             }
 
             $postulacion->refresh();
@@ -289,7 +360,7 @@ class PostulacionController extends Controller
         $data = [];
         foreach ($estados as $estado) {
             $data[$estado] = Postulacion::where('estado', $estado)
-                ->with('perfilCargo:id,nombre')
+                ->with('perfilCargo:id,nombre,ciudad')
                 ->latest('fecha_recepcion')
                 ->limit(50)
                 ->get(['id', 'nombre_completo', 'email', 'estado', 'fuente', 'perfil_cargo_id', 'fecha_recepcion', 'created_at']);

@@ -8,6 +8,89 @@ import { useGSAP } from '@gsap/react'
 /* ─── CONSTANTES Y DICCIONARIOS ── */
 const ESTADOS = ['recibida', 'en_revision', 'preseleccionado', 'descartado', 'contratado']
 
+/* Áreas metropolitanas de las sedes (Bogotá y Medellín). Se usa para clasificar
+   la ciudad de residencia del candidato en una de las dos sedes. */
+const REGIONES_SEDE = {
+  'Bogotá': ['bogota', 'soacha', 'chia', 'cajica', 'cota', 'mosquera', 'madrid', 'funza', 'facatativa', 'zipaquira', 'tocancipa', 'gachancipa', 'cogua', 'la calera', 'sibate', 'fusagasuga', 'guaymaral', 'sopo', 'tenjo', 'tabio'],
+  'Medellín': ['medellin', 'bello', 'itagui', 'envigado', 'sabaneta', 'la estrella', 'copacabana', 'girardota', 'caldas', 'barbosa', 'rionegro'],
+}
+
+function normalizarCiudad(ciudad) {
+  if (!ciudad) return ''
+  return ciudad
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quitar tildes
+    .split(/[,\-–/(]/)[0]                              // solo la primera parte
+    .replace(/\bd\.?\s*c\.?\b/g, '')                   // quitar "D.C."
+    .replace(/\s+/g, ' ')
+    .replace(/[.,;·]+$/, '')                           // puntuación suelta que deja el paso anterior
+    .trim()
+}
+
+/* Devuelve 'Bogotá' | 'Medellín' | null según dónde reside el candidato. */
+function regionDeSede(ciudad) {
+  const key = normalizarCiudad(ciudad)
+  if (!key) return null
+  for (const [sede, municipios] of Object.entries(REGIONES_SEDE)) {
+    if (municipios.includes(key)) return sede
+  }
+  return null
+}
+
+/* ─── Utilidades de fecha ────────────────────────────────────────────
+   El reclutador necesita distinguir de un vistazo lo que llegó hoy de lo
+   que lleva semanas esperando, así que la fecha es un dato de primer nivel. */
+function fechaDe(p) {
+  const raw = p.fecha_recepcion || p.created_at
+  if (!raw) return null
+  const d = new Date(raw)
+  return isNaN(d.getTime()) ? null : d
+}
+
+function diasDesde(fecha) {
+  if (!fecha) return null
+  return Math.floor((Date.now() - fecha.getTime()) / 86400000)
+}
+
+/* "hace 20 min" · "ayer" · "hace 3 días" · "12 mar 26" */
+function fechaRelativa(fecha) {
+  if (!fecha) return 'Sin fecha'
+  const min = Math.floor((Date.now() - fecha.getTime()) / 60000)
+  if (min < 1) return 'ahora mismo'
+  if (min < 60) return `hace ${min} min`
+  const horas = Math.floor(min / 60)
+  if (horas < 24) return `hace ${horas} h`
+  const dias = Math.floor(horas / 24)
+  if (dias === 1) return 'ayer'
+  if (dias < 7) return `hace ${dias} días`
+  if (dias < 31) return `hace ${Math.floor(dias / 7)} sem`
+  const meses = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+  return `${fecha.getDate()} ${meses[fecha.getMonth()]} ${fecha.getFullYear()}`
+}
+
+function fechaCompleta(fecha) {
+  if (!fecha) return 'Fecha de recepción no registrada'
+  return 'Recibida el ' + fecha.toLocaleDateString('es-CO', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  }) + ' a las ' + fecha.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+}
+
+/* Ciudad de la vacante (la del perfil de cargo), que es la que define
+   dónde se necesita a la persona — distinta de dónde vive el candidato. */
+function ciudadVacante(p) {
+  const c = p.perfil_cargo?.ciudad
+  return c && String(c).trim() ? String(c).trim() : null
+}
+
+/* true cuando el candidato y la vacante están en áreas metropolitanas distintas */
+function requiereTraslado(p) {
+  const vac = ciudadVacante(p)
+  if (!vac || !p.ciudad) return false
+  const sedeVac = regionDeSede(vac) || normalizarCiudad(vac)
+  const sedeCand = regionDeSede(p.ciudad) || normalizarCiudad(p.ciudad)
+  return Boolean(sedeVac && sedeCand && sedeVac !== sedeCand)
+}
+
 const statusLabel = {
   recibida: 'Recibida', en_revision: 'En revisión',
   preseleccionado: 'Preseleccionado', descartado: 'Descartado', contratado: 'Contratado',
@@ -297,11 +380,14 @@ function RadarChart({ ev, size = 135 }) {
   )
 }
 
-function GridCard({ p, onOpen }) {
+function GridCard({ p, onOpen, onToggleMarca }) {
   const ev       = p.candidato?.evaluaciones?.[0]
   const parseo   = p.candidato?.estado_parseo
   const educacion = p.candidato?.datos_extraidos?.educacion || []
   const ultimoTitulo = educacion[0]?.titulo
+  const fecha    = fechaDe(p)
+  const dias     = diasDesde(fecha)
+  const traslado = requiereTraslado(p)
 
   const scoreBorder = (ev?.puntaje_total ?? 0) >= 80 
     ? 'border-emerald-250 hover:border-emerald-400' 
@@ -323,17 +409,36 @@ function GridCard({ p, onOpen }) {
       {/* Left Column: Candidate Main Info */}
       <div className="flex-1 min-w-0 flex flex-col justify-between gap-3">
         <div className="space-y-3">
-          {/* Nombre y Profesión */}
-          <div className="space-y-1">
-            <h3 className="font-black text-slate-950 text-[20px] leading-snug tracking-tight group-hover:text-brand-650 transition-colors uppercase truncate" title={p.nombre_completo}>
+          {/* Fecha de recepción — lo primero que se lee en la tarjeta */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <SelloNovedad dias={dias} />
+              <span className="flex items-center gap-1 text-[11.5px] font-bold text-slate-500" title={fechaCompleta(fecha)}>
+                <IconTime className="w-3 h-3 shrink-0" />
+                {fechaRelativa(fecha)}
+              </span>
+            </div>
+            <BotonMarcar marcada={p.marcada} onClick={(e) => { e.stopPropagation(); onToggleMarca(p) }} />
+          </div>
+
+          {/* Nombre, cargo y ciudad de la vacante */}
+          <div className="space-y-1.5">
+            <h3 className="font-black text-slate-950 text-[19px] leading-snug tracking-tight group-hover:text-brand-600 transition-colors uppercase truncate" title={p.nombre_completo}>
               {p.nombre_completo}
             </h3>
             <div className="flex items-center gap-1.5 text-slate-900 font-extrabold tracking-wide">
               <IconBriefcase className="w-4 h-4 text-brand-600 shrink-0" />
-              <span className="text-[14px] truncate">
-                {p.perfil_cargo ? p.perfil_cargo.nombre : 'Sin cargo postulado'}
+              <span className={`text-[14px] truncate ${p.perfil_cargo ? '' : 'text-amber-700'}`}>
+                {p.perfil_cargo ? p.perfil_cargo.nombre : 'Sin cargo asignado'}
               </span>
             </div>
+            <ChipCiudadVacante p={p} size="lg" />
+            {p.ciudad && (
+              <p className="text-[12px] font-bold text-slate-500 truncate" title="Ciudad de residencia del candidato">
+                Reside en {p.ciudad}
+                {traslado && <span className="text-amber-700"> · requiere traslado</span>}
+              </p>
+            )}
           </div>
 
           {/* Contacto: Email & Teléfono */}
@@ -416,23 +521,277 @@ function GridCard({ p, onOpen }) {
   )
 }
 
-/* ─── Vista Cuadrícula ─────────────────────────────────────────── */
-function GridView({ items, onOpen }) {
-  if (items.length === 0) {
+/* ─── Iconos de la barra de herramientas ─────────────────────────── */
+function IconList({ className = "w-4 h-4" }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5M3.75 17.25h16.5" />
+    </svg>
+  )
+}
+function IconGridView({ className = "w-4 h-4" }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 5.25h6v6h-6v-6zm10.5 0h6v6h-6v-6zm-10.5 10.5h6v6h-6v-6zm10.5 0h6v6h-6v-6z" />
+    </svg>
+  )
+}
+function IconFilter({ className = "w-4 h-4" }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 5.25h16.5l-6.4 7.62v5.13l-3.7 2.25v-7.38L3.75 5.25z" />
+    </svg>
+  )
+}
+function IconStarSolid({ className = "w-4 h-4" }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="currentColor">
+      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+    </svg>
+  )
+}
+
+/* ─── Piezas compartidas entre lista y cuadrícula ────────────────── */
+
+/* Chip de la ciudad donde está abierta la vacante. Es el dato que el
+   reclutador busca primero: "¿para qué ciudad es este candidato?" */
+function ChipCiudadVacante({ p, size = 'sm' }) {
+  const ciudad = ciudadVacante(p)
+  const pad = size === 'lg' ? 'px-2.5 py-1 text-[12px]' : 'px-2 py-[2px] text-[11px]'
+  if (!ciudad) return null
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-lg border border-brand-200 bg-brand-50 font-black uppercase tracking-wide text-brand-700 ${pad}`}
+          title={`Vacante abierta en ${ciudad}`}>
+      <IconMapPin className="w-3 h-3 shrink-0" />
+      <span className="truncate max-w-[130px]">{ciudad}</span>
+    </span>
+  )
+}
+
+/* Sello de novedad: verde las primeras 48 h, ámbar la primera semana. */
+function SelloNovedad({ dias }) {
+  if (dias === null || dias > 7) return null
+  if (dias <= 2) {
     return (
-      <div className="card text-center py-16 text-surface-550">
-        <svg className="w-12 h-12 mx-auto mb-3 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-        <p className="font-semibold text-surface-700">Sin candidatos que coincidan</p>
-        <p className="text-xs text-surface-500 mt-1">Ajusta los filtros para ver más resultados.</p>
-      </div>
+      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500 px-1.5 py-[1px] text-[9.5px] font-black uppercase tracking-widest text-white">
+        <span className="h-1.5 w-1.5 rounded-full bg-white animate-pulse-slow" />
+        Nuevo
+      </span>
     )
   }
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5 animate-slide-up">
-      {items.map(p => <GridCard key={p.id} p={p} onOpen={onOpen} />)}
+    <span className="inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-[1px] text-[9.5px] font-black uppercase tracking-widest text-emerald-700 border border-emerald-200">
+      Esta semana
+    </span>
+  )
+}
+
+function BotonMarcar({ marcada, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={marcada ? 'Quitar marca de seguimiento' : 'Marcar para seguimiento'}
+      className={`rounded-lg p-1.5 transition-colors ${marcada
+        ? 'text-amber-500 hover:bg-amber-100'
+        : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50'}`}
+    >
+      <IconStarSolid className="w-4 h-4" />
+    </button>
+  )
+}
+
+/* ─── Vista Lista (por defecto) ──────────────────────────────────
+   Una fila por candidato con las seis respuestas que el reclutador
+   necesita sin abrir nada: quién, para qué cargo, en qué ciudad, en qué
+   estado va, qué puntaje le dio la IA y hace cuánto llegó. */
+const COLS_LISTA = 'grid-cols-[minmax(0,2.3fr)_minmax(0,2fr)_minmax(0,1.1fr)_128px_74px_112px_40px]'
+
+function ListHeader() {
+  return (
+    <div className={`hidden lg:grid ${COLS_LISTA} gap-3 items-center px-4 py-2.5 border-b border-slate-200 bg-slate-50/80 backdrop-blur sticky top-0 z-10 rounded-t-2xl`}>
+      {['Candidato', 'Cargo', 'Ciudad', 'Estado', 'Puntaje IA', 'Recibido'].map((h, i) => (
+        <span key={h} className={`text-[10px] font-black uppercase tracking-widest text-slate-500 ${i === 4 ? 'text-center' : ''}`}>{h}</span>
+      ))}
+      <span />
     </div>
+  )
+}
+
+function ListRow({ p, onOpen, onToggleMarca }) {
+  const ev     = p.candidato?.evaluaciones?.[0]
+  const parseo = p.candidato?.estado_parseo
+  const fecha  = fechaDe(p)
+  const dias   = diasDesde(fecha)
+  const sede   = regionDeSede(p.ciudad)
+  const traslado = requiereTraslado(p)
+
+  const marcar = (e) => { e.stopPropagation(); onToggleMarca(p) }
+
+  const bloqueEstado = (
+    <div className="flex flex-col items-start gap-1">
+      <span className={`badge text-[10px] font-black px-2 py-0.5 rounded-md uppercase ${statusCls[p.estado] || ''}`}>
+        {statusLabel[p.estado] || p.estado}
+      </span>
+      {!ev && parseo === 'procesando' && (
+        <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wide">Analizando…</span>
+      )}
+      {!ev && parseo === 'procesado' && (
+        <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wide">Sin evaluar</span>
+      )}
+    </div>
+  )
+
+  return (
+    <div
+      onClick={() => onOpen(p.id)}
+      className={`group relative cursor-pointer border-b border-slate-100 last:border-b-0 transition-colors candidate-card
+        ${p.marcada ? 'bg-amber-50/40 hover:bg-amber-50/70' : 'bg-white hover:bg-brand-50/40'}`}
+    >
+      {/* Barra de frescura: verde = llegó en las últimas 48 h */}
+      <span className={`absolute left-0 top-0 bottom-0 w-[3px] ${dias !== null && dias <= 2 ? 'bg-emerald-500' : dias !== null && dias <= 7 ? 'bg-emerald-200' : 'bg-transparent'}`} />
+
+      {/* ── Escritorio ── */}
+      <div className={`hidden lg:grid ${COLS_LISTA} gap-3 items-center px-4 py-3`}>
+        {/* Candidato */}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 shrink-0 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white font-black flex items-center justify-center text-[13px]">
+            {p.nombre_completo?.charAt(0)?.toUpperCase() || '?'}
+          </div>
+          <div className="min-w-0">
+            <p className="font-extrabold text-[14px] text-slate-900 truncate group-hover:text-brand-600 transition-colors" title={p.nombre_completo}>
+              {p.nombre_completo}
+            </p>
+            <p className="text-[12px] font-semibold text-slate-500 truncate" title={p.email}>{p.email || 'Sin correo'}</p>
+          </div>
+        </div>
+
+        {/* Vacante · Ciudad */}
+        <div className="min-w-0">
+          <p className={`text-[13.5px] font-extrabold truncate ${p.perfil_cargo ? 'text-slate-900' : 'text-amber-700'}`}
+             title={p.perfil_cargo?.nombre || 'Sin cargo asignado'}>
+            {p.perfil_cargo?.nombre || 'Sin cargo asignado'}
+          </p>
+          <div className="mt-1"><ChipCiudadVacante p={p} /></div>
+        </div>
+
+        {/* Reside en */}
+        <div className="min-w-0">
+          {p.ciudad ? (
+            <>
+              <p className="text-[13px] font-bold text-slate-700 truncate" title={p.ciudad}>{p.ciudad}</p>
+              {traslado
+                ? <span className="text-[10px] font-black uppercase tracking-wide text-amber-700">Requiere traslado</span>
+                : sede && <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{sede}</span>}
+            </>
+          ) : (
+            <span className="text-[12px] font-semibold text-slate-300">—</span>
+          )}
+        </div>
+
+        {bloqueEstado}
+
+        <div className="flex justify-center"><ScoreRing score={ev?.puntaje_total} size={42} /></div>
+
+        {/* Recibido */}
+        <div className="min-w-0" title={fechaCompleta(fecha)}>
+          <p className="text-[12.5px] font-bold text-slate-700 truncate">{fechaRelativa(fecha)}</p>
+          <div className="mt-0.5"><SelloNovedad dias={dias} /></div>
+        </div>
+
+        <BotonMarcar marcada={p.marcada} onClick={marcar} />
+      </div>
+
+      {/* ── Móvil / tablet ── */}
+      <div className="lg:hidden px-4 py-3.5 flex gap-3">
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <SelloNovedad dias={dias} />
+            <span className="text-[11px] font-bold text-slate-500" title={fechaCompleta(fecha)}>{fechaRelativa(fecha)}</span>
+          </div>
+          <p className="font-extrabold text-[15px] text-slate-900 truncate">{p.nombre_completo}</p>
+          <p className={`text-[13px] font-bold truncate ${p.perfil_cargo ? 'text-slate-700' : 'text-amber-700'}`}>
+            {p.perfil_cargo?.nombre || 'Sin cargo asignado'}
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <ChipCiudadVacante p={p} />
+            <span className={`badge text-[10px] font-black px-2 py-0.5 rounded-md uppercase ${statusCls[p.estado] || ''}`}>
+              {statusLabel[p.estado] || p.estado}
+            </span>
+          </div>
+          {p.ciudad && (
+            <p className="text-[11.5px] font-semibold text-slate-500">
+              Reside en {p.ciudad}{traslado ? ' · requiere traslado' : ''}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-col items-center justify-between shrink-0">
+          <BotonMarcar marcada={p.marcada} onClick={marcar} />
+          <ScoreRing score={ev?.puntaje_total} size={44} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ListView({ items, onOpen, onToggleMarca }) {
+  if (items.length === 0) return <SinResultados />
+  return (
+    <div className="bg-white border border-surface-200 rounded-2xl shadow-sm overflow-hidden animate-slide-up">
+      <ListHeader />
+      {items.map(p => <ListRow key={p.id} p={p} onOpen={onOpen} onToggleMarca={onToggleMarca} />)}
+    </div>
+  )
+}
+
+function SinResultados() {
+  return (
+    <div className="card text-center py-16 text-surface-550">
+      <svg className="w-12 h-12 mx-auto mb-3 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg>
+      <p className="font-semibold text-surface-700">Sin candidatos que coincidan</p>
+      <p className="text-xs text-surface-500 mt-1">Ajusta los filtros para ver más resultados.</p>
+    </div>
+  )
+}
+
+/* ─── Vista Cuadrícula ─────────────────────────────────────────── */
+function GridView({ items, onOpen, onToggleMarca }) {
+  if (items.length === 0) return <SinResultados />
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5 animate-slide-up">
+      {items.map(p => <GridCard key={p.id} p={p} onOpen={onOpen} onToggleMarca={onToggleMarca} />)}
+    </div>
+  )
+}
+
+/* ─── Controles de la barra de filtros ───────────────────────────── */
+function CampoFiltro({ label, children, className = '' }) {
+  return (
+    <label className={`flex flex-col gap-1 ${className}`}>
+      <span className="pl-0.5 text-[9.5px] font-black uppercase tracking-widest text-slate-400">{label}</span>
+      {children}
+    </label>
+  )
+}
+
+function ChipFiltro({ active, onClick, children, count, tone = 'brand', title }) {
+  const tonos = {
+    brand:   active ? 'bg-brand-500 border-brand-500 text-white'   : 'bg-white border-slate-200 text-slate-700 hover:border-brand-300 hover:bg-brand-50/50',
+    emerald: active ? 'bg-emerald-500 border-emerald-500 text-white' : 'bg-white border-slate-200 text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/50',
+    amber:   active ? 'bg-amber-500 border-amber-500 text-white'   : 'bg-white border-slate-200 text-slate-700 hover:border-amber-300 hover:bg-amber-50/50',
+  }
+  return (
+    <button type="button" onClick={onClick} title={title}
+      className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-[12.5px] font-bold transition-colors ${tonos[tone]}`}>
+      {children}
+      {count != null && (
+        <span className={`rounded-full px-1.5 text-[10.5px] font-black leading-[16px] ${active ? 'bg-white/25 text-white' : 'bg-slate-100 text-slate-600'}`}>
+          {count}
+        </span>
+      )}
+    </button>
   )
 }
 
@@ -484,13 +843,66 @@ export default function Postulaciones() {
     }
   }
 
+  /* Vista: lista compacta por defecto, tarjetas para ver más detalle */
+  const [viewMode, setViewMode] = useState(() => {
+    try { return localStorage.getItem('candidatos_vista') || 'lista' } catch { return 'lista' }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('candidatos_vista', viewMode) } catch { /* modo privado */ }
+  }, [viewMode])
+
   /* Filtros */
   const [search, setSearch]           = useState('')
   const [filterCargo, setFilterCargo] = useState('')
   const [filterEstado, setFilterEstado] = useState('')
   const [filterRecom, setFilterRecom] = useState('')
   const [filterExp, setFilterExp]     = useState('')
-  const [sortBy, setSortBy]           = useState('score_desc')
+  const [filterCiudad, setFilterCiudad] = useState('')
+  const [filterCiudadVacante, setFilterCiudadVacante] = useState('')
+  const [filterNuevos, setFilterNuevos] = useState(false)
+  const [filterMarcada, setFilterMarcada] = useState(false)
+  const [masFiltros, setMasFiltros]   = useState(false)
+  /* Lo más reciente primero: es la pregunta que el reclutador hace al entrar */
+  const [sortBy, setSortBy]           = useState('fecha_desc')
+
+  // Opciones del filtro de ciudad, tomadas de la ciudad de residencia del
+  // candidato. Se agrupan por nombre normalizado ("Bogotá" y "Bogotá D.C." son
+  // la misma) y se ofrecen primero las áreas metropolitanas de las sedes.
+  const opcionesCiudad = useMemo(() => {
+    const porCiudad = new Map()
+    const porSede = new Map()
+    let sinCiudad = 0
+    for (const p of postulaciones) {
+      const key = normalizarCiudad(p.ciudad)
+      if (!key) { sinCiudad++; continue }
+      const item = porCiudad.get(key) || { key, count: 0, etiquetas: new Map() }
+      item.count++
+      const etiqueta = String(p.ciudad).split(',')[0].trim()
+      item.etiquetas.set(etiqueta, (item.etiquetas.get(etiqueta) || 0) + 1)
+      porCiudad.set(key, item)
+      const sede = regionDeSede(p.ciudad)
+      if (sede) porSede.set(sede, (porSede.get(sede) || 0) + 1)
+    }
+    const sedes = ['Bogotá', 'Medellín']
+      .filter(s => porSede.has(s))
+      .map(s => ({ value: `sede:${s}`, label: `Área de ${s}`, count: porSede.get(s) }))
+    const ciudades = [...porCiudad.values()]
+      .map(c => ({
+        value: `ciudad:${c.key}`,
+        // la forma de escribirla más frecuente
+        label: [...c.etiquetas.entries()].sort((a, b) => b[1] - a[1])[0][0],
+        count: c.count,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'es'))
+    return { sedes, ciudades, sinCiudad }
+  }, [postulaciones])
+
+  // Ciudades en las que hay vacantes con postulaciones. Responde directamente
+  // a "¿para qué ciudad es este candidato?" sin depender de dónde vive.
+  const ciudadesVacantes = useMemo(() => {
+    const set = new Set(postulaciones.map(p => ciudadVacante(p)).filter(Boolean))
+    return [...set].sort((a, b) => a.localeCompare(b, 'es'))
+  }, [postulaciones])
 
   // Obtener únicamente los cargos que actualmente tienen postulaciones para el filtro de cargos
   const cargosConPostulaciones = useMemo(() => {
@@ -513,10 +925,28 @@ export default function Postulaciones() {
     }
   }, [])
 
+  /* Marcar o quitar la marca desde el propio listado, con actualización
+     optimista para que la estrella responda al instante. */
+  const toggleMarca = useCallback(async (p) => {
+    const nuevoValor = !p.marcada
+    setPostulaciones(prev => prev.map(x => (x.id === p.id ? { ...x, marcada: nuevoValor } : x)))
+    try {
+      await api.patch(`/postulaciones/${p.id}/marca`, { marcada: nuevoValor })
+    } catch (err) {
+      console.error('No se pudo cambiar la marca:', err)
+      setPostulaciones(prev => prev.map(x => (x.id === p.id ? { ...x, marcada: !nuevoValor } : x)))
+    }
+  }, [])
+
   /* Estadísticas globales */
   const stats = useMemo(() => {
     const total      = postulaciones.length
     const conCv      = postulaciones.filter(p => p.archivo_cv).length
+    const nuevos7d   = postulaciones.filter(p => {
+      const d = diasDesde(fechaDe(p))
+      return d !== null && d <= 7
+    }).length
+    const marcadas   = postulaciones.filter(p => p.marcada).length
     const analizados = postulaciones.filter(p => p.candidato?.estado_parseo === 'procesado').length
     const evaluados  = postulaciones.filter(p => (p.candidato?.evaluaciones?.length ?? 0) > 0).length
     
@@ -544,7 +974,7 @@ export default function Postulaciones() {
       .map(v => Number(v))
       .filter(v => !isNaN(v))
     const avgScore   = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null
-    return { total, conCv, analizados, evaluados, pendientes, sinCargo, pendientesAnalisis, avgScore }
+    return { total, conCv, nuevos7d, marcadas, analizados, evaluados, pendientes, sinCargo, pendientesAnalisis, avgScore }
   }, [postulaciones])
 
   useEffect(() => {
@@ -755,7 +1185,19 @@ export default function Postulaciones() {
       })
     }
     if (filterCargo)  list = list.filter(p => String(p.perfil_cargo_id) === filterCargo)
+    if (filterCiudadVacante) list = list.filter(p => ciudadVacante(p) === filterCiudadVacante)
+    if (filterNuevos) list = list.filter(p => {
+      const d = diasDesde(fechaDe(p))
+      return d !== null && d <= 7
+    })
     if (filterEstado) list = list.filter(p => p.estado === filterEstado)
+    if (filterCiudad) {
+      const [tipo, valor] = filterCiudad.split(':')
+      if (tipo === 'sede')   list = list.filter(p => regionDeSede(p.ciudad) === valor)
+      if (tipo === 'ciudad') list = list.filter(p => normalizarCiudad(p.ciudad) === valor)
+      if (tipo === 'sin')    list = list.filter(p => !normalizarCiudad(p.ciudad))
+    }
+    if (filterMarcada) list = list.filter(p => p.marcada)
     if (filterRecom) {
       if (filterRecom === 'sin_evaluar') {
         list = list.filter(p => !(p.candidato?.evaluaciones?.length))
@@ -794,10 +1236,10 @@ export default function Postulaciones() {
         case 'fecha_desc': return bDate - aDate
         case 'fecha_asc':  return aDate - bDate
         case 'nombre':     return (a.nombre_completo || '').localeCompare(b.nombre_completo || '')
-        default:           return 0
+        default:           return bDate - aDate
       }
     })
-  }, [postulaciones, search, filterCargo, filterEstado, filterRecom, filterExp, sortBy])
+  }, [postulaciones, search, filterCargo, filterEstado, filterRecom, filterExp, filterCiudad, filterCiudadVacante, filterNuevos, filterMarcada, sortBy])
 
 
 
@@ -829,34 +1271,47 @@ export default function Postulaciones() {
 
   useGSAP(() => {
     if (!loading && filtered.length > 0) {
-      // 2. Animación de entrada con stagger para las tarjetas de candidatos
-      gsap.fromTo('.candidate-card',
-        { opacity: 0, y: 35 },
-        { 
-          opacity: 1, 
-          y: 0, 
-          duration: 0.6, 
-          ease: 'power3.out', 
-          stagger: 0.04 
-        }
-      )
+      // 2. Entrada escalonada, limitada a lo que cabe en pantalla: con listas
+      //    largas un stagger sobre todas las filas dejaría las últimas
+      //    invisibles durante varios segundos.
+      const visibles = gsap.utils.toArray('.candidate-card').slice(0, 15)
+      if (visibles.length) {
+        gsap.fromTo(visibles,
+          { opacity: 0, y: viewMode === 'lista' ? 12 : 35 },
+          {
+            opacity: 1,
+            y: 0,
+            duration: viewMode === 'lista' ? 0.35 : 0.6,
+            ease: 'power3.out',
+            stagger: 0.03,
+          }
+        )
+      }
 
       // 3. Animación de rebote (bounce-in) para los polígonos de habilidades IA
-      gsap.fromTo('.radar-score-polygon',
-        { scale: 0, transformOrigin: 'center center' },
-        { 
-          scale: 1, 
-          duration: 0.8, 
-          ease: 'back.out(1.6)', 
-          delay: 0.15,
-          stagger: 0.04 
-        }
-      )
+      const radares = gsap.utils.toArray('.radar-score-polygon').slice(0, 15)
+      if (radares.length) {
+        gsap.fromTo(radares,
+          { scale: 0, transformOrigin: 'center center' },
+          {
+            scale: 1,
+            duration: 0.8,
+            ease: 'back.out(1.6)',
+            delay: 0.15,
+            stagger: 0.04,
+          }
+        )
+      }
     }
-  }, { scope: containerRef, dependencies: [loading, filtered] })
+  }, { scope: containerRef, dependencies: [loading, filtered, viewMode] })
 
-  const hasFilters = search || filterCargo || filterEstado || filterRecom || filterExp
-  const clearFilters = () => { setSearch(''); setFilterCargo(''); setFilterEstado(''); setFilterRecom(''); setFilterExp('') }
+  const hasFilters = search || filterCargo || filterCiudadVacante || filterEstado || filterRecom || filterExp || filterCiudad || filterMarcada || filterNuevos
+  const filtrosAvanzados = [filterRecom, filterExp, filterCiudadVacante].filter(Boolean).length
+  const clearFilters = () => {
+    setSearch(''); setFilterCargo(''); setFilterCiudadVacante(''); setFilterEstado('')
+    setFilterRecom(''); setFilterExp(''); setFilterCiudad('')
+    setFilterMarcada(false); setFilterNuevos(false)
+  }
 
   return (
     <div ref={containerRef} className="space-y-6 animate-fade-in text-surface-700">
@@ -866,7 +1321,7 @@ export default function Postulaciones() {
         <div>
           <h1 className="section-title">Candidatos</h1>
           <p className="section-sub">
-            {stats.total} postulaciones · {stats.analizados} analidadas · {stats.evaluadas ?? stats.evaluados} evaluadas por IA
+            {stats.total} postulaciones · <span className="font-bold text-emerald-700">{stats.nuevos7d} nuevas esta semana</span> · {stats.evaluados} evaluadas por IA
           </p>
         </div>
 
@@ -929,23 +1384,37 @@ export default function Postulaciones() {
         </div>
       )}
 
-      {/* ── Strip de estadísticas ── */}
-      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
+      {/* ── Resumen accionable: cada recuadro es también un filtro ── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {[
-          { l: 'Total',        v: stats.total,      c: 'text-surface-900',     border: 'border-surface-200 bg-white' },
-          { l: 'Con CV',       v: stats.conCv,      c: 'text-brand-600',       border: 'border-brand-100 bg-brand-50/20' },
-          { l: 'Analizados',   v: stats.analizados, c: 'text-violet-600',      border: 'border-violet-100 bg-violet-50/20' },
-          { l: 'Evaluados IA', v: stats.evaluados,  c: 'text-emerald-600',     border: 'border-emerald-100 bg-emerald-50/20' },
-          { l: 'Sin evaluar',  v: stats.pendientes, c: stats.pendientes > 0 ? 'text-amber-800' : 'text-surface-400', border: stats.pendientes > 0 ? 'border-amber-100 bg-amber-50/20' : 'border-surface-200 bg-white' },
-          { l: 'Score prom.',  v: stats.avgScore != null ? stats.avgScore : '—', c: (stats.avgScore ?? 0) >= 70 ? 'text-emerald-600' : (stats.avgScore ?? 0) >= 50 ? 'text-brand-600' : 'text-amber-800', border: 'border-surface-200 bg-white' },
+          { l: 'Total',          v: stats.total,     c: 'text-surface-900', border: 'border-surface-200 bg-white',
+            onClick: clearFilters, active: !hasFilters },
+          { l: 'Nuevas 7 días',  v: stats.nuevos7d,  c: 'text-emerald-600', border: 'border-emerald-200 bg-emerald-50/30',
+            onClick: () => { clearFilters(); setFilterNuevos(true) }, active: filterNuevos },
+          { l: 'Sin evaluar',    v: stats.pendientes, c: stats.pendientes > 0 ? 'text-amber-700' : 'text-surface-400',
+            border: stats.pendientes > 0 ? 'border-amber-200 bg-amber-50/30' : 'border-surface-200 bg-white',
+            onClick: () => setFilterRecom(r => (r === 'sin_evaluar' ? '' : 'sin_evaluar')), active: filterRecom === 'sin_evaluar' },
+          { l: 'Marcadas',       v: stats.marcadas,  c: 'text-amber-600', border: 'border-surface-200 bg-white',
+            onClick: () => setFilterMarcada(v => !v), active: filterMarcada },
+          { l: 'Evaluadas IA',   v: stats.evaluados, c: 'text-brand-600', border: 'border-brand-100 bg-brand-50/20' },
+          { l: 'Score prom.',    v: stats.avgScore != null ? stats.avgScore : '—',
+            c: (stats.avgScore ?? 0) >= 70 ? 'text-emerald-600' : (stats.avgScore ?? 0) >= 50 ? 'text-brand-600' : 'text-amber-700',
+            border: 'border-surface-200 bg-white' },
         ].map((s, i) => (
-          <div key={i} className={`border ${s.border} rounded-2xl p-4 text-center transition-all hover:-translate-y-0.5 duration-200 shadow-sm stat-box`}>
+          <button
+            key={i}
+            type="button"
+            onClick={s.onClick}
+            disabled={!s.onClick}
+            className={`border ${s.border} rounded-2xl p-3.5 text-center shadow-sm transition-all duration-200 stat-box
+              ${s.onClick ? 'cursor-pointer hover:-translate-y-0.5 hover:shadow-md' : 'cursor-default'}
+              ${s.active ? 'ring-2 ring-brand-400 ring-offset-1' : ''}`}
+          >
             <p className={`text-2xl font-bold ${s.c} tabular-nums stat-val-num`} data-target={s.v}>{s.v}</p>
-            <p className="text-xs text-slate-800 font-bold mt-1 uppercase tracking-wider">{s.l}</p>
-          </div>
+            <p className="text-[11px] text-slate-700 font-bold mt-1 uppercase tracking-wider">{s.l}</p>
+          </button>
         ))}
       </div>
-
       {/* Banner de advertencia si hay candidatos analizados sin perfil de cargo asignado */}
       {stats.sinCargo > 0 && (
         <div className="bg-amber-50 border border-amber-250 text-amber-900 rounded-2xl p-4 flex items-start gap-3 shadow-sm animate-fade-in font-bold text-sm">
@@ -959,63 +1428,156 @@ export default function Postulaciones() {
         </div>
       )}
 
-      {/* ── Barra de filtros ── */}
-      <div className="bg-white border border-surface-200 rounded-2xl p-3 flex items-center gap-3 flex-wrap shadow-sm">
-        {/* Búsqueda */}
-        <div className="flex-1 min-w-40 relative">
-          <IconSearch className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-400" />
-          <input
-            className="input !pl-9 !py-2.5 text-sm font-bold"
-            placeholder="Buscar por nombre, email, habilidades, certificaciones..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
+      {/* ── Barra de filtros ──
+           Tres niveles: lo esencial arriba, accesos rápidos en medio y el
+           resto plegado, para que la vista no abrume al entrar. */}
+      <div className="bg-white border border-surface-200 rounded-2xl shadow-sm divide-y divide-slate-100">
+
+        {/* Nivel 1 — búsqueda, cargo, ciudad, estado y orden */}
+        <div className="p-3 flex items-end gap-2.5 flex-wrap">
+          <CampoFiltro label="Buscar" className="flex-1 min-w-[230px]">
+            <div className="relative">
+              <IconSearch className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-400" />
+              <input
+                className="input !pl-9 !py-2.5 text-sm font-semibold"
+                placeholder="Nombre, correo, habilidad o certificación..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+            </div>
+          </CampoFiltro>
+
+          <CampoFiltro label="Cargo">
+            <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+              value={filterCargo} onChange={e => setFilterCargo(e.target.value)}>
+              <option value="">Todos los cargos</option>
+              {cargosConPostulaciones.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select>
+          </CampoFiltro>
+
+          <CampoFiltro label="Ciudad del candidato">
+            <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+              value={filterCiudad} onChange={e => setFilterCiudad(e.target.value)}>
+              <option value="">Todas las ciudades</option>
+              {opcionesCiudad.sedes.length > 0 && (
+                <optgroup label="Sedes (incluye municipios cercanos)">
+                  {opcionesCiudad.sedes.map(o => <option key={o.value} value={o.value}>{o.label} ({o.count})</option>)}
+                </optgroup>
+              )}
+              <optgroup label="Ciudades">
+                {opcionesCiudad.ciudades.map(o => <option key={o.value} value={o.value}>{o.label} ({o.count})</option>)}
+              </optgroup>
+              {opcionesCiudad.sinCiudad > 0 && (
+                <option value="sin:">Sin ciudad registrada ({opcionesCiudad.sinCiudad})</option>
+              )}
+            </select>
+          </CampoFiltro>
+
+          <CampoFiltro label="Estado">
+            <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+              value={filterEstado} onChange={e => setFilterEstado(e.target.value)}>
+              <option value="">Todos los estados</option>
+              {ESTADOS.map(e => <option key={e} value={e}>{statusLabel[e]}</option>)}
+            </select>
+          </CampoFiltro>
+
+          <CampoFiltro label="Ordenar por">
+            <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+              value={sortBy} onChange={e => setSortBy(e.target.value)}>
+              <option value="fecha_desc">Más recientes primero</option>
+              <option value="fecha_asc">Más antiguas primero</option>
+              <option value="score_desc">Mayor puntaje IA</option>
+              <option value="score_asc">Menor puntaje IA</option>
+              <option value="nombre">Nombre (A–Z)</option>
+            </select>
+          </CampoFiltro>
         </div>
 
-        <select className="select !py-2 text-sm font-semibold" style={{ width: 'auto' }} value={filterCargo} onChange={e => setFilterCargo(e.target.value)}>
-          <option value="">Todos los cargos</option>
-          {cargosConPostulaciones.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-        </select>
+        {/* Nivel 2 — accesos rápidos, contador y selector de vista */}
+        <div className="px-3 py-2.5 flex items-center gap-2 flex-wrap">
+          <ChipFiltro tone="emerald" active={filterNuevos} count={stats.nuevos7d}
+            onClick={() => setFilterNuevos(v => !v)} title="Postulaciones recibidas en los últimos 7 días">
+            Últimos 7 días
+          </ChipFiltro>
+          <ChipFiltro tone="amber" active={filterMarcada} count={stats.marcadas}
+            onClick={() => setFilterMarcada(v => !v)} title="Solo las hojas de vida marcadas">
+            <IconStarSolid className="w-3.5 h-3.5" />
+            Marcadas
+          </ChipFiltro>
+          <ChipFiltro active={filterRecom === 'sin_evaluar'} count={stats.pendientes}
+            onClick={() => setFilterRecom(r => (r === 'sin_evaluar' ? '' : 'sin_evaluar'))}
+            title="Candidatos que la IA aún no ha evaluado">
+            Sin evaluar
+          </ChipFiltro>
+          <ChipFiltro active={masFiltros} count={filtrosAvanzados || null}
+            onClick={() => setMasFiltros(v => !v)}>
+            <IconFilter className="w-3.5 h-3.5" />
+            Más filtros
+          </ChipFiltro>
+          {hasFilters && (
+            <button onClick={clearFilters}
+              className="text-[12.5px] font-bold text-slate-500 hover:text-red-600 px-2 py-1.5 rounded-lg hover:bg-red-50 transition-colors">
+              ✕ Limpiar filtros
+            </button>
+          )}
 
-        <select className="select !py-2 text-sm font-semibold" style={{ width: 'auto' }} value={filterEstado} onChange={e => setFilterEstado(e.target.value)}>
-          <option value="">Todos los estados</option>
-          {ESTADOS.map(e => <option key={e} value={e}>{statusLabel[e]}</option>)}
-        </select>
+          <div className="ml-auto flex items-center gap-3">
+            <span className="text-[12.5px] text-slate-600 font-bold tabular-nums">
+              {filtered.length} de {stats.total}
+            </span>
+            <div className="flex items-center rounded-xl border border-slate-200 p-0.5 bg-slate-50">
+              {[
+                { id: 'lista',   Icono: IconList,     label: 'Lista' },
+                { id: 'tarjetas', Icono: IconGridView, label: 'Tarjetas' },
+              ].map(({ id, Icono, label }) => (
+                <button key={id} type="button" onClick={() => setViewMode(id)} title={`Vista de ${label.toLowerCase()}`}
+                  className={`inline-flex items-center gap-1.5 rounded-[10px] px-2.5 py-1.5 text-[12px] font-bold transition-colors ${
+                    viewMode === id ? 'bg-white text-brand-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>
+                  <Icono className="w-4 h-4" />
+                  <span className="hidden sm:inline">{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
 
-        <select className="select !py-2 text-sm font-semibold" style={{ width: 'auto' }} value={filterRecom} onChange={e => setFilterRecom(e.target.value)}>
-          <option value="">Todas las recom.</option>
-          <option value="altamente_recomendado">★ Altamente recom.</option>
-          <option value="recomendado">✓ Recomendado</option>
-          <option value="con_reservas">⚠ Con reservas</option>
-          <option value="no_recomendado">✗ No recomendado</option>
-          <option value="sin_evaluar">○ Sin evaluar</option>
-        </select>
+        {/* Nivel 3 — filtros que casi nunca se tocan */}
+        {masFiltros && (
+          <div className="px-3 py-3 flex items-end gap-2.5 flex-wrap bg-slate-50/50 animate-slide-up">
+            <CampoFiltro label="Recomendación IA">
+              <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+                value={filterRecom} onChange={e => setFilterRecom(e.target.value)}>
+                <option value="">Todas las recomendaciones</option>
+                <option value="altamente_recomendado">★ Altamente recomendado</option>
+                <option value="recomendado">✓ Recomendado</option>
+                <option value="con_reservas">⚠ Con reservas</option>
+                <option value="no_recomendado">✗ No recomendado</option>
+                <option value="sin_evaluar">○ Sin evaluar</option>
+              </select>
+            </CampoFiltro>
 
-        <select className="select !py-2 text-sm font-semibold" style={{ width: 'auto' }} value={filterExp} onChange={e => setFilterExp(e.target.value)}>
-          <option value="">Cualquier experiencia</option>
-          <option value="sin_experiencia">Sin experiencia / &lt; 1 año</option>
-          <option value="1_2_anos">1 a 2 años</option>
-          <option value="3_5_anos">3 a 5 años</option>
-          <option value="mas_5_anos">Más de 5 años</option>
-        </select>
+            <CampoFiltro label="Experiencia">
+              <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+                value={filterExp} onChange={e => setFilterExp(e.target.value)}>
+                <option value="">Cualquier experiencia</option>
+                <option value="sin_experiencia">Sin experiencia / &lt; 1 año</option>
+                <option value="1_2_anos">1 a 2 años</option>
+                <option value="3_5_anos">3 a 5 años</option>
+                <option value="mas_5_anos">Más de 5 años</option>
+              </select>
+            </CampoFiltro>
 
-        <select className="select !py-2 text-sm font-semibold" style={{ width: 'auto' }} value={sortBy} onChange={e => setSortBy(e.target.value)}>
-          <option value="score_desc">↓ Mayor score</option>
-          <option value="score_asc">↑ Menor score</option>
-          <option value="fecha_desc">📅 Más reciente</option>
-          <option value="fecha_asc">📅 Más antiguo</option>
-          <option value="nombre">A–Z Nombre</option>
-        </select>
-
-        {hasFilters && (
-          <button onClick={clearFilters} className="btn-secondary !py-2 text-sm font-bold !px-3.5 hover:bg-slate-50 transition-colors">
-            ✕ Limpiar
-          </button>
+            {ciudadesVacantes.length > 0 && (
+              <CampoFiltro label="Ciudad de la vacante">
+                <select className="select !py-2.5 text-sm font-semibold" style={{ width: 'auto' }}
+                  value={filterCiudadVacante} onChange={e => setFilterCiudadVacante(e.target.value)}>
+                  <option value="">Todas las ciudades</option>
+                  {ciudadesVacantes.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </CampoFiltro>
+            )}
+          </div>
         )}
-
-        <span className="text-sm text-slate-800 ml-auto font-bold tabular-nums">
-          {filtered.length} resultado{filtered.length !== 1 ? 's' : ''}
-        </span>
       </div>
 
       {/* ── Contenido principal ── */}
@@ -1029,8 +1591,10 @@ export default function Postulaciones() {
             <p className="text-sm font-medium">Cargando candidatos...</p>
           </div>
         </div>
+      ) : viewMode === 'lista' ? (
+        <ListView items={filtered} onOpen={setSelectedId} onToggleMarca={toggleMarca} />
       ) : (
-        <GridView items={filtered} onOpen={setSelectedId} />
+        <GridView items={filtered} onOpen={setSelectedId} onToggleMarca={toggleMarca} />
       )}
 
       {selectedId && (

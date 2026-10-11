@@ -12,17 +12,20 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         // Usuarios HR
-        User::firstOrCreate(['email' => 'admin@hidroobras.com.co'], [
+        User::updateOrCreate(['email' => 'admin@hidroobras.com.co'], [
             'name'     => 'Administrador RRHH',
             'password' => Hash::make('Hidroobras2024!'),
+            'role_id'  => 1,
         ]);
-        User::firstOrCreate(['email' => 'coordinadorsst@hidroobras.com.co'], [
+        User::updateOrCreate(['email' => 'coordinadorsst@hidroobras.com.co'], [
             'name'     => 'Coordinador SST',
             'password' => Hash::make('Hidroobras2024!'),
+            'role_id'  => 2,
         ]);
-        User::firstOrCreate(['email' => 'alexforero@hidroobras.com.co'], [
+        User::updateOrCreate(['email' => 'alexforero@hidroobras.com.co'], [
             'name'     => 'Alex Forero',
             'password' => Hash::make('Hidroobras2024!'),
+            'role_id'  => 2,
         ]);
 
         // Perfiles de cargo oficiales de Hidroobras (Exactamente 3 perfiles finales)

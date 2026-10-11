@@ -14,6 +14,7 @@ class PerfilCargo extends Model
     protected $fillable = [
         'nombre',
         'area',
+        'ciudad',
         'descripcion',
         'requisitos',
         'salario_rango',
